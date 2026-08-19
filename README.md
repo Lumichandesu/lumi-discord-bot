@@ -34,45 +34,15 @@ Lumi Bot resolves metadata dynamically and streams high-fidelity audio across al
 
 ---
 
-## 🛠️ Tech Stack
+## 🚀 Quick Start & Self-Hosting
 
-* **Runtime:** [Bun](https://bun.sh) (v1.x)
-* **Language:** TypeScript
-* **Discord Library:** [discord.js](https://discord.js.org) (v14) & `@discordjs/voice`
-* **Audio Processing:** `yt-dlp` + `ffmpeg` (Raw S16LE 48000Hz 2-Channel PCM)
-* **Database:** Embedded SQLite (Local playback history & analytics)
-* **Web & API Framework:** [ElysiaJS](https://elysiajs.com) (High-throughput internal REST server)
+### 1. Prerequisites
+* [Bun](https://bun.sh) (v1.1+)
+* `ffmpeg` installed on your system (`sudo apt install ffmpeg`)
+* `yt-dlp` installed in `$PATH` or `~/bin/yt-dlp`
 
----
-
-## 🎵 Commands
-
-| Command | Arguments | Description |
-| :--- | :--- | :--- |
-| `\play` | `<Title / URL>` | Stream audio from YouTube, Spotify, Apple Music, TIDAL, or SoundCloud |
-| `\pause` | — | Pause the current playback |
-| `\resume` | — | Resume paused playback |
-| `\skip` | — | Skip the current track to the next item in queue |
-| `\stop` | — | Stop playback, clear queue, and leave the voice channel |
-| `\nowplaying` | — | Display live metadata of the currently playing track |
-| `\queue` | — | View the upcoming playlist queue |
-| `\loop` | — | Cycle loop modes: `off` ➔ `track` ➔ `queue` |
-| `\shuffle` | — | Randomize the order of queued tracks |
-| `\remove` | `<#>` | Remove a specific track from the queue by its index number |
-| `\clear` | — | Clear all upcoming tracks in the queue |
-
----
-
-## 🚀 Deployment & Service Management
-
-The bot runs as a background systemd user service on Linux:
-
+### 2. Installation
 ```bash
-# Check service status
-systemctl --user status lumi-discord-bot.service
-
-# View real-time logs
-journalctl --user -u lumi-discord-bot.service -f
-
-# Restart service after updates
-systemctl --user restart lumi-discord-bot.service
+git clone [https://github.com/Lumichandesu/lumi-discord-bot.git](https://github.com/Lumichandesu/lumi-discord-bot.git)
+cd lumi-discord-bot
+bun install

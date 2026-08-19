@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { Provider, ResolvedTrack } from "./types";
 import { detectProvider } from "./resolver";
 
@@ -18,7 +19,18 @@ interface SpotifyOEmbed {
   thumbnail_url?: string;
 }
 
-const YTDLP = `${process.env.HOME}/bin/yt-dlp`;
+function resolveYtDlpBinary(): string {
+  if (process.env.YTDLP_PATH && existsSync(process.env.YTDLP_PATH)) {
+    return process.env.YTDLP_PATH;
+  }
+  const homeBin = `${process.env.HOME}/bin/yt-dlp`;
+  if (existsSync(homeBin)) {
+    return homeBin;
+  }
+  return "yt-dlp";
+}
+
+const YTDLP = resolveYtDlpBinary();
 
 function run(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
