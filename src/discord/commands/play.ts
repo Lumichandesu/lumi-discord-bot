@@ -4,12 +4,12 @@ import { play } from "../../music/player";
 
 export const playCommand: BotCommand = {
   name: "play",
-  description: "Play a YouTube, SoundCloud, Spotify, Apple Music, or Tidal URL / Search query",
+  description: "Play a YouTube, SoundCloud, Spotify, Apple Music, or TIDAL URL / Search query",
   async execute(message: Message, args: string[]) {
     const query = args.join(" ").trim();
 
     if (!query) {
-      await message.reply("🎵 `\\play <ชื่อเพลง / URL (YouTube, SoundCloud, Spotify, Apple Music, Tidal)>`");
+      await message.reply("🎵 Usage: `\\play <Song Title / URL (YouTube, Spotify, Apple Music, TIDAL, SoundCloud)>`");
       return;
     }
 
@@ -19,7 +19,7 @@ export const playCommand: BotCommand = {
       await message.reply(
         result.queued
           ? `🎵 Added to queue: **${result.track.info.title}**`
-          : `▶️ **${result.track.info.title}**`,
+          : `▶️ Playing: **${result.track.info.title}**`,
       );
     } catch (error) {
       console.error("[Play]", error);

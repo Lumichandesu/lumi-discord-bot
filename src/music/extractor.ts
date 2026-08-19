@@ -58,7 +58,7 @@ function run(args: string[]): Promise<string> {
         resolve(stdout.trim());
         return;
       }
-      reject(new Error(stderr.trim() || `yt-dlp exited with code ${code}`));
+      reject(new Error(stderr.trim() || `yt-dlp process exited with code ${code}`));
     });
   });
 }
@@ -67,13 +67,13 @@ function normalizeExtractorError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
 
   if (message.includes("Sign in to confirm you're not a bot")) {
-    return new Error("YouTube ปฏิเสธการเชื่อมต่อชั่วคราว");
+    return new Error("YouTube temporarily restricted access (bot verification required).");
   }
   if (message.includes("HTTP Error 403") || message.includes("HTTP Error 429")) {
-    return new Error("แหล่งเพลงจำกัดการเข้าถึงชั่วคราว");
+    return new Error("Audio source access temporarily rate limited or restricted.");
   }
   if (message.includes("Video unavailable") || message.includes("This video is unavailable")) {
-    return new Error("เพลงหรือวิดีโอนี้ไม่พร้อมใช้งาน");
+    return new Error("This track or video is unavailable.");
   }
 
   return new Error(message.replace(/^ERROR:\s*/i, "").trim().slice(0, 300));
@@ -94,7 +94,7 @@ async function extractWithYtDlp(target: string, provider: Provider): Promise<Res
   const entry = parsed.entries && parsed.entries.length > 0 ? parsed.entries[0] : parsed;
 
   if (!entry?.url) {
-    throw new Error("ไม่พบ audio stream สำหรับเพลงนี้");
+    throw new Error("No suitable audio stream found for this track.");
   }
 
   return {
@@ -115,12 +115,12 @@ async function resolveSpotify(url: string): Promise<ResolvedTrack> {
   );
 
   if (!response.ok) {
-    throw new Error(`Spotify metadata request failed: ${response.status}`);
+    throw new Error(`Spotify metadata request failed with status: ${response.status}`);
   }
 
   const metadata = (await response.json()) as SpotifyOEmbed;
   if (!metadata.title) {
-    throw new Error("ไม่สามารถอ่านชื่อเพลงจาก Spotify URL ได้");
+    throw new Error("Unable to extract track title from Spotify URL.");
   }
 
   const track = await extractWithYtDlp(`ytsearch1:${metadata.title} official audio`, "spotify");
@@ -140,7 +140,7 @@ async function resolveAppleMusic(url: string): Promise<ResolvedTrack> {
   });
 
   if (!response.ok) {
-    throw new Error(`Apple Music request failed: ${response.status}`);
+    throw new Error(`Apple Music request failed with status: ${response.status}`);
   }
 
   const html = await response.text();
@@ -149,7 +149,7 @@ async function resolveAppleMusic(url: string): Promise<ResolvedTrack> {
     html.match(/<title>([^<]+)<\/title>/i);
 
   if (!ogTitleMatch || !ogTitleMatch[1]) {
-    throw new Error("ไม่สามารถอ่านชื่อเพลงจาก Apple Music URL ได้");
+    throw new Error("Unable to extract track title from Apple Music URL.");
   }
 
   const cleanedTitle = ogTitleMatch[1]
@@ -181,7 +181,7 @@ async function resolveTidal(url: string): Promise<ResolvedTrack> {
   });
 
   if (!response.ok) {
-    throw new Error(`Tidal request failed: ${response.status}`);
+    throw new Error(`TIDAL request failed with status: ${response.status}`);
   }
 
   const html = await response.text();
@@ -190,7 +190,7 @@ async function resolveTidal(url: string): Promise<ResolvedTrack> {
     html.match(/<title>([^<]+)<\/title>/i);
 
   if (!ogTitleMatch || !ogTitleMatch[1]) {
-    throw new Error("ไม่สามารถอ่านชื่อเพลงจาก Tidal URL ได้");
+    throw new Error("Unable to extract track title from TIDAL URL.");
   }
 
   const cleanedTitle = ogTitleMatch[1]
