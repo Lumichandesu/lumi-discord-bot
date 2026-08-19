@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+*.bak
+dist/
