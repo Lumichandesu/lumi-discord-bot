@@ -1,13 +1,12 @@
 node_modules/
 .env
 *.db
+*.db-journal
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 logs/
 *.log
 *.bak
 dist/
-data/
-*.json
-!package.json
-!tsconfig.json
