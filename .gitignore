@@ -7,3 +7,7 @@ logs/
 *.log
 *.bak
 dist/
+data/
+*.json
+!package.json
+!tsconfig.json
