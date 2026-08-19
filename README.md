@@ -1,6 +1,18 @@
+<div align="center">
+
 # 🎵 Lumi Bot `Ver001`
 
-> Ultra-low latency, featherlight Discord music streaming engine built natively with **Bun**, **TypeScript**, **ElysiaJS**, and **FFmpeg**.
+[![Bun](https://img.shields.io/badge/Bun-1.1+-fbf0df?style=for-the-badge&logo=bun&logoColor=black)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![discord.js](https://img.shields.io/badge/discord.js-v14-5865f2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.js.org)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-Native_Pipeline-007808?style=for-the-badge&logo=ffmpeg&logoColor=white)](https://ffmpeg.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
+
+<br />
+
+> **Ultra-low latency, featherlight Discord music streaming engine built natively with Bun, TypeScript, ElysiaJS, and FFmpeg.**
+
+</div>
 
 ---
 
