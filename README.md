@@ -1,60 +1,63 @@
-<div align="center">
+# 🎵 Lumi Discord Bot (v1.1)
 
-# 🎵 Lumi Bot `Ver001`
-
-[![Bun](https://img.shields.io/badge/Bun-1.1+-fbf0df?style=for-the-badge&logo=bun&logoColor=black)](https://bun.sh)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178c6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![discord.js](https://img.shields.io/badge/discord.js-v14-5865f2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.js.org)
-[![FFmpeg](https://img.shields.io/badge/FFmpeg-Native_Pipeline-007808?style=for-the-badge&logo=ffmpeg&logoColor=white)](https://ffmpeg.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
-
-<br />
-
-> **Ultra-low latency, featherlight Discord music streaming engine built natively with Bun, TypeScript, ElysiaJS, and FFmpeg.**
-
-</div>
+A minimal, ultra-lightweight, and high-fidelity Discord music bot built with **Bun**, **Discord.js**, and **@discordjs/voice**. Engineered to run 24/7 on low-spec clotd instances (e.g., Google Cloud `e2-micro` (Always Free Tier)) with memory consumption under 80 MB.
 
 ---
 
-## ⚡ Overview
+## 🙩 What's New in Version 1.1
 
-**Lumi Bot (Ver001)** is a custom-engineered Discord music bot designed to eliminate the heavy memory footprint and instability of legacy Java/Lavalink middleware. By streaming directly via a native **`yt-dlp` + `ffmpeg`** raw PCM audio pipeline into Discord Voice, it achieves instant playback, zero IP-block issues, and extreme resource efficiency on lightweight 1 GB VMs.
-
----
-
-## 📊 Architecture & Performance Benchmark
-
-| Metric / Specification | Legacy Stack (Java / Lavalink) | Lumi Bot Ver001 (Native) | Performance Gain |
-| :--- | :--- | :--- | :--- |
-| **Runtime Engine** | Node.js + OpenJDK 17 | **Bun + TypeScript** | Bare-metal execution |
-| **Total System RAM** | ~580 MB | **~361 MB** *(OS + Bot + DB)* | **~40% Memory Saved** |
-| **Playback Start Latency** | ~3.8s | **< 1.2s** | **~3x Faster Playback** |
-| **Audio Delivery Pipeline** | Java Scraper (Block-prone) | **`yt-dlp` + FFmpeg Direct PCM** | Direct 48kHz Stereo Pipe |
-| **Storage & API Stack** | External / Standalone | **Embedded SQLite + ElysiaJS** | Zero disk lag & instant queries |
+- **➡ Lavalink-Free Native Engine:** Replaced external Java Lavalink nodes with native `@discordjs/voice` and FFmpeg raw PCM streaming, cutting RAM usage from ~500MB+ down to <80MB.
+- **🎥 Interactive Button UI:** Control tracks directly in Discord with interactive buttons (Play/Pause, Skip, Loop, Shuffle, Stop, Queue, Lyrics).
+- **🌐 Universal Platform Resolver:** Playback support for YouTube, Spotify, Apple Music, and TIDAL via automated metadata bridging.
+- **�s Lyrics & Seek Commands:** Integrated `\lyrics` powered by LRCLIB and precise timestamp hopping via `\seek <mm:ss>`.
+- **🚪 Smart Auto-Disconnect:** Automatically leaves empty voice channels after 30 seconds or idle queues after 3 minutes.
+-$**@ Real-time System Telemetry:** Upgraded `\ping` command displaying WebSocket latency, roundtrip time, heap RAM, and uptime.
+-$**@ Command Shortcuts:** Added quick aliases (`\p`, `\np`, `\q`, `\s`, `\h`, `\l`).
 
 ---
 
-## 🌐 Supported Platforms
+## 🐖 Command Reference
 
-Lumi Bot resolves metadata dynamically and streams high-fidelity audio across all major platforms:
+Prefix: `\�` (Also supports native `/`  Slash Commands)
 
-* 🔴 **YouTube** & YouTube Music (Tracks & Search queries)
-* 🟢 **Spotify** (Direct Track Links)
-* 🍎 **Apple Music** (Direct Track Links)
-* ⚫ **TIDAL** (Direct Track Links)
-* 🟠 **SoundCloud** (Direct Track & Search queries)
+| Command | Alias | Description | Example |
+|
+--- |
+--- |
+--- |
+--- |
+| `\play <query>` | `\p` | Play from YouTube, Spotify, Apple Music, TIDAL, SoundCloud | `\play feel it d4vd` |
+| `\pause` | — | Pause current audio playback | `\pause` |
+| `\resume` | — | Resume paused playback | `\resume` |
+| `\skip` | `\s` | Skip to the next track in queue | `\skip` |
+| `\stop` | — | Stop music, clear queue, and disconnect | `\stop` |
+| `\seek <time>` | — | Jump to specific timestamp | `\seek 1:45` |
+| `\nowplaying` | `\np` | Display detailed metadata of current track | `\nowplaying` |
+| `\queue` | `\qp` | View upcoming tracks in queue | `\queue` |
+| `\loop` | — | Cycle repeat mode (`OFF` ➠ `TRACK` ➠ `QUEUE`) | `\loop` |
+| `\shuffle` | — | Randomize queued tracks | `\shuffle` |
+| `\remove <#>` | — | Remove a track from queue by position | `\remove 3` |
+| `\clear` | — | Clear all upcoming tracks in queue | `\clear` |
+| `\lyrics [query]` | `\l` | Search and display track lyrics | `\lyrics` |
+| `\ping` | — | Display network ping and memory usage | `\ping` |
+| `\help` | `\h` | Display help guide | `\help` |
 
 ---
 
-## 🚀 Quick Start & Self-Hosting
+3! 💌 Setup & Installation
 
-### 1. Prerequisites
-* [Bun](https://bun.sh) (v1.1+)
-* `ffmpeg` installed on your system (`sudo apt install ffmpeg`)
-* `yt-dlp` installed in `$PATH` or `~/bin/yt-dlp`
+### Prerequisites
+- Bun (v1.1+)
+- FFmpeg
+- yt-dlp
 
-### 2. Installation
-```bash
-git clone [https://github.com/Lumichandesu/lumi-discord-bot.git](https://github.com/Lumichandesu/lumi-discord-bot.git)
-cd lumi-discord-bot
-bun install
+### Installation Steps
+1. Clone the repository: `git clone https://github.com/Lumichandesu/lumi-discord-bot.git`
+2. Install dependencies: `bun install`
+3. Configure environment: `cp .env.example .env`
+4. Start the bot: `bun run src/index.ts`
+
+---
+
+## �� License
+MIT License © 2026 Lumichandesu
