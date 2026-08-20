@@ -1,36 +1,44 @@
-import type { Message } from "discord.js";
+import { EmbedBuilder, type Message } from "discord.js";
 import type { BotCommand } from "./types";
-import { getLavalink } from "../../music/lavalink";
 
 export const pingCommand: BotCommand = {
   name: "ping",
-  description: "Check bot latency and Lavalink node ping",
+  description: "Check bot performance and system metrics",
   async execute(message: Message) {
-    const sent = await message.reply("🏓 Pinging...");
+    const start = Date.now();
+    const sent = await message.reply("Pinging...");
+    const latency = Date.now() - start;
+    const ws = message.client.ws.ping;
+    
+    // System Metrics
+    const uptime = process.uptime();
+    const mem = process.memoryUsage().heapUsed / 1024 / 1024;
+    
+    const formatUptime = (seconds: number) => {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = Math.floor(seconds % 60);
+      return `${h}h ${m}m ${s}s`;
+    };
 
-    const roundtrip = sent.createdTimestamp - message.createdTimestamp;
-    const wsPing = message.client.ws.ping;
+    const embed = new EmbedBuilder()
+      .setTitle("🏓 Pong!")
+      .setColor(0x0099ff)
+      .addFields(
+        { 
+          name: "📡 Network Latency", 
+          value: `• WebSocket: \`${ws}ms\`\n• Roundtrip: \`${latency}ms\``, 
+          inline: true 
+        },
+        { 
+          name: "🖥️ System Metrics", 
+          value: `• Uptime: \`${formatUptime(uptime)}\`\n• Heap RAM: \`${mem.toFixed(2)} MB\``, 
+          inline: true 
+        }
+      )
+      .setTimestamp()
+      .setFooter({ text: "Lumi Bot | Optimized for e2-micro" });
 
-    let nodePingText = "N/A";
-    try {
-      const lavalink = getLavalink();
-      const node = lavalink.nodeManager.leastUsedNodes()[0];
-      if (node && node.connected) {
-        const start = Date.now();
-        await node.fetchInfo();
-        nodePingText = `${Date.now() - start}ms`;
-      }
-    } catch {
-      // Node offline or request failed
-    }
-
-    const text = [
-      "🏓 **Pong!**",
-      `📡 **Message Latency:** \`${roundtrip}ms\``,
-      `💓 **Discord WebSocket:** \`${wsPing >= 0 ? `${wsPing}ms` : "Connecting..."}\``,
-      `🎵 **Lavalink Node:** \`${nodePingText}\``,
-    ].join("\n");
-
-    await sent.edit(text);
+    await sent.edit({ content: null, embeds: [embed] });
   },
 };

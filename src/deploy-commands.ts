@@ -12,6 +12,8 @@ const commands = [
   new SlashCommandBuilder()
     .setName("play")
     .setDescription("Stream music from YouTube, Spotify, Apple Music, TIDAL, or SoundCloud")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1])
     .addStringOption((option) =>
       option
         .setName("query")
@@ -20,57 +22,55 @@ const commands = [
     ),
   new SlashCommandBuilder()
     .setName("skip")
-    .setDescription("Skip the currently playing track"),
+    .setDescription("Skip the currently playing track")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("stop")
-    .setDescription("Stop playback, clear queue, and leave voice channel"),
+    .setDescription("Stop playback, clear queue, and leave voice channel")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("nowplaying")
-    .setDescription("Display live metadata of the currently playing track"),
+    .setDescription("Display live metadata of the currently playing track")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("queue")
-    .setDescription("View upcoming tracks in the queue"),
+    .setDescription("View upcoming tracks in the queue")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("pause")
-    .setDescription("Pause current playback"),
+    .setDescription("Pause current playback")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("resume")
-    .setDescription("Resume paused playback"),
-  new SlashCommandBuilder()
-    .setName("loop")
-    .setDescription("Set queue loop mode")
-    .addStringOption((option) =>
-      option
-        .setName("mode")
-        .setDescription("Loop mode")
-        .setRequired(false)
-        .addChoices(
-          { name: "Off", value: "off" },
-          { name: "Single Track", value: "track" },
-          { name: "Whole Queue", value: "queue" }
-        )
-    ),
+    .setDescription("Resume paused playback")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("shuffle")
-    .setDescription("Randomize queued tracks"),
+    .setDescription("Randomize queued tracks")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
   new SlashCommandBuilder()
     .setName("clear")
-    .setDescription("Clear all tracks in the upcoming queue"),
+    .setDescription("Clear all tracks in the upcoming queue")
+    .setContexts([0, 1, 2])
+    .setIntegrationTypes([0, 1]),
 ].map((cmd) => cmd.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(token);
 
 async function deploy() {
   try {
-    console.log(`⏳ Registering ${commands.length} application (/) commands to Discord...`);
-
-    await rest.put(Routes.applicationCommands(clientId as string), {
-      body: commands,
-    });
-
-    console.log("✅ Successfully registered global Slash Commands!");
+    console.log(`⏳ Updating ${commands.length} application commands with global contexts...`);
+    await rest.put(Routes.applicationCommands(clientId as string), { body: commands });
+    console.log("✅ Commands updated successfully!");
   } catch (error) {
-    console.error("❌ Failed to register commands:", error);
+    console.error("❌ Failed to update commands:", error);
   }
 }
 

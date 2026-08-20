@@ -1,0 +1,181 @@
+import type { Message, Guild } from "discord.js";
+import type { Player, Track, UnresolvedTrack, RepeatMode, LavalinkManager } from "lavalink-client";
+import { getLavalink } from "./lavalink";
+import { resolveTrack } from "./extractor";
+
+export type SearchTrack = Track | UnresolvedTrack;
+
+export function requireGuild(message: Message): Guild {
+  if (!message.guild) throw new Error("Music commands require a server.");
+  return message.guild;
+}
+
+export function requireVoiceChannel(message: Message): string {
+  const channel = message.member?.voice.channel;
+  if (!channel) throw new Error("Join a voice channel first.");
+  if (!channel.isVoiceBased()) throw new Error("Invalid voice channel.");
+  return channel.id;
+}
+
+export function getPlayer(guildId: string): Player | null {
+  return getLavalink().players.get(guildId) ?? null;
+}
+
+async function ensureConnectedNode(lavalink: LavalinkManager, timeoutMs = 8000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const hasConnected = Array.from(lavalink.nodeManager.nodes.values()).some((n) => n.connected);
+    if (hasConnected) return;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  throw new Error("ระบบเสียงกำลังเชื่อมต่อ กรุณาลองใหม่อีกครั้งใน 5 วินาที");
+}
+
+async function getOrCreatePlayer(message: Message): Promise<Player> {
+  const guild = requireGuild(message);
+  const voiceChannelId = requireVoiceChannel(message);
+  const lavalink = getLavalink();
+
+  await ensureConnectedNode(lavalink);
+
+  let player = lavalink.players.get(guild.id);
+
+  if (player) {
+    if (player.options.voiceChannelId !== voiceChannelId) {
+      await player.changeVoiceState({ voiceChannelId });
+    }
+    if (!player.connected) {
+      await player.connect();
+    }
+    return player;
+  }
+
+  player = lavalink.createPlayer({
+    guildId: guild.id,
+    voiceChannelId,
+    textChannelId: message.channel.id,
+    selfDeaf: true,
+    selfMute: false,
+    volume: 100,
+    applyVolumeAsFilter: false,
+  });
+
+  await player.connect();
+  return player;
+}
+
+export async function play(
+  message: Message,
+  query: string,
+): Promise<{ track: SearchTrack; queued: boolean }> {
+  const player = await getOrCreatePlayer(message);
+
+  // 1. ดึง metadata + direct audio stream URL ผ่าน yt-dlp
+  const resolved = await resolveTrack(query);
+
+  // 2. ส่ง streamUrl ให้ Lavalink HTTP source
+  const result = await player.search(resolved.streamUrl, message.author);
+  const track = result.tracks?.[0];
+
+  if (!track) {
+    throw new Error(`ไม่สามารถโหลด audio stream สำหรับ "${resolved.title}"`);
+  }
+
+  // 3. ผูก metadata จริงให้ Track Info
+  track.info.title = resolved.title;
+  track.info.author = resolved.uploader;
+  track.info.uri = resolved.sourceUrl;
+  if (resolved.duration) {
+    track.info.duration = resolved.duration * 1000;
+  }
+  if (resolved.thumbnail) {
+    track.info.artworkUrl = resolved.thumbnail;
+  }
+
+  const wasPlaying = player.playing || Boolean(player.queue.current);
+
+  await player.queue.add(track);
+
+  if (!player.playing && !player.paused) {
+    await player.play();
+  }
+
+  return {
+    track,
+    queued: wasPlaying,
+  };
+}
+
+export async function pause(guildId: string): Promise<void> {
+  const player = getPlayer(guildId);
+  if (!player || !player.queue.current) throw new Error("Nothing is currently playing.");
+  if (player.paused) throw new Error("Player is already paused.");
+  await player.pause();
+}
+
+export async function resume(guildId: string): Promise<void> {
+  const player = getPlayer(guildId);
+  if (!player || !player.queue.current) throw new Error("No music player is active.");
+  if (!player.paused) throw new Error("Player is already playing.");
+  await player.resume();
+}
+
+export async function skip(guildId: string): Promise<SearchTrack | null> {
+  const player = getPlayer(guildId);
+  if (!player || !player.queue.current) throw new Error("Nothing is playing to skip.");
+
+  const currentTrack = player.queue.current;
+  await player.skip();
+  return currentTrack;
+}
+
+export async function stop(guildId: string): Promise<void> {
+  const player = getPlayer(guildId);
+  if (!player) return;
+
+  player.queue.tracks.length = 0;
+  await player.destroy("Command: stop", true);
+}
+
+export function toggleLoop(guildId: string): RepeatMode {
+  const player = getPlayer(guildId);
+  if (!player || !player.queue.current) throw new Error("Nothing is currently playing.");
+
+  let nextMode: RepeatMode = "off";
+  if (player.repeatMode === "off") nextMode = "track";
+  else if (player.repeatMode === "track") nextMode = "queue";
+  else nextMode = "off";
+
+  player.setRepeatMode(nextMode);
+  return nextMode;
+}
+
+export function shuffleQueue(guildId: string): number {
+  const player = getPlayer(guildId);
+  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is empty.");
+
+  player.queue.shuffle();
+  return player.queue.tracks.length;
+}
+
+export function clearQueue(guildId: string): number {
+  const player = getPlayer(guildId);
+  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is already empty.");
+
+  const count = player.queue.tracks.length;
+  player.queue.tracks.length = 0;
+  return count;
+}
+
+export function removeQueueTrack(guildId: string, index: number): SearchTrack {
+  const player = getPlayer(guildId);
+  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is empty.");
+
+  if (index < 1 || index > player.queue.tracks.length) {
+    throw new Error(`Invalid track number. Choose 1 to ${player.queue.tracks.length}.`);
+  }
+
+  const removed = player.queue.tracks.splice(index - 1, 1)[0];
+  if (!removed) throw new Error("Failed to remove track.");
+  return removed;
+}

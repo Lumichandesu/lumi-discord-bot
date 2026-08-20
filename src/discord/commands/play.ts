@@ -1,6 +1,7 @@
 import type { Message } from "discord.js";
 import type { BotCommand } from "./types";
 import { play } from "../../music/player";
+import { createNowPlayingEmbed } from "../components/playerEmbed";
 
 export const playCommand: BotCommand = {
   name: "play",
@@ -16,11 +17,12 @@ export const playCommand: BotCommand = {
     try {
       const result = await play(message, query);
 
-      await message.reply(
-        result.queued
-          ? `🎵 Added to queue: **${result.track.info.title}**`
-          : `▶️ Playing: **${result.track.info.title}**`,
-      );
+      if (result.queued) {
+        await message.reply(`🎵 Added to queue: **${result.track.info.title}**`);
+      } else {
+        const ui = createNowPlayingEmbed(result.track.info, false, "off");
+        await message.reply(ui);
+      }
     } catch (error) {
       console.error("[Play]", error);
       await message.reply(

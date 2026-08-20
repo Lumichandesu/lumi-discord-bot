@@ -1,329 +1,314 @@
 import {
   createAudioPlayer,
   createAudioResource,
-  joinVoiceChannel,
   AudioPlayerStatus,
-  VoiceConnectionStatus,
+  joinVoiceChannel,
+  VoiceConnection,
+  AudioPlayer,
   StreamType,
-  type AudioPlayer,
-  type VoiceConnection,
+  VoiceConnectionStatus,
+  entersState,
 } from "@discordjs/voice";
-import { spawn, type ChildProcess } from "node:child_process";
-import type { Message, Guild } from "discord.js";
+import { spawn } from "node:child_process";
+import type { Provider, ResolvedTrack } from "./types";
 import { resolveTrack } from "./extractor";
-import { logPlayedTrack } from "../database/db";
 
-export type RepeatMode = "off" | "track" | "queue";
-
-export interface TrackInfo {
-  title: string;
-  author: string;
-  uri: string;
-  duration?: number | null;
-  artworkUrl?: string | null;
-}
-
-export interface SearchTrack {
-  info: TrackInfo;
-  streamUrl: string;
-  sourceUrl: string;
-  userData: {
-    requester: {
-      tag: string;
-      id: string;
-    };
+export interface PlayerTrack extends ResolvedTrack {
+  info: {
+    title: string;
+    uri: string;
+    author: string;
+    duration: number;
+    thumbnail: string | null;
   };
 }
 
-export class GuildPlayer {
+export interface BotPlayer {
   guildId: string;
   voiceChannelId: string;
-  textChannelId: string;
-  connection: VoiceConnection | null = null;
+  connection: VoiceConnection;
   audioPlayer: AudioPlayer;
-  repeatMode: RepeatMode = "off";
-  paused = false;
-  currentProcess: ChildProcess | null = null;
+  repeatMode: "off" | "track" | "queue";
+  isPaused: boolean;
+  idleTimeout: ReturnType<typeof setTimeout> | null;
   queue: {
-    current: SearchTrack | null;
-    tracks: SearchTrack[];
-  } = {
-    current: null,
-    tracks: [],
+    current: PlayerTrack | null;
+    tracks: PlayerTrack[];
   };
+}
 
-  constructor(guildId: string, voiceChannelId: string, textChannelId: string) {
-    this.guildId = guildId;
-    this.voiceChannelId = voiceChannelId;
-    this.textChannelId = textChannelId;
-    this.audioPlayer = createAudioPlayer();
+export const players = new Map<string, BotPlayer>();
 
-    this.audioPlayer.on(AudioPlayerStatus.Idle, async () => {
-      this.stopProcess();
+export function getPlayer(guildId: string): BotPlayer | undefined {
+  return players.get(guildId);
+}
 
-      if (this.repeatMode === "track" && this.queue.current) {
-        await this.playTrack(this.queue.current);
-        return;
-      }
+export function requireGuild(ctx: any): any {
+  const guild = ctx.guild || ctx.member?.guild;
+  if (!guild) throw new Error("This command can only be used in a Discord server.");
+  return guild;
+}
 
-      if (this.repeatMode === "queue" && this.queue.current) {
-        this.queue.tracks.push(this.queue.current);
-      }
+export function requireVoiceChannel(ctx: any): any {
+  const channel = ctx.member?.voice?.channel;
+  if (!channel) throw new Error("You must be in a voice channel to use this command.");
+  return channel;
+}
 
-      const nextTrack = this.queue.tracks.shift();
-      if (nextTrack) {
-        await this.playTrack(nextTrack);
-      } else {
-        this.queue.current = null;
-      }
-    });
+function toPlayerTrack(resolved: ResolvedTrack): PlayerTrack {
+  return {
+    ...resolved,
+    info: {
+      title: resolved.title,
+      uri: resolved.sourceUrl,
+      author: resolved.uploader,
+      duration: resolved.duration || 0,
+      thumbnail: resolved.thumbnail,
+    },
+  };
+}
 
-    this.audioPlayer.on("error", (error) => {
-      console.error(`[AudioPlayer] Guild ${this.guildId} error:`, error.message);
-      this.stopProcess();
-      const nextTrack = this.queue.tracks.shift();
-      if (nextTrack) {
-        this.playTrack(nextTrack);
-      } else {
-        this.queue.current = null;
-      }
-    });
+function createOptimizedStream(streamUrl: string, seekSeconds = 0) {
+  const ffmpegArgs = [
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
+  ];
+
+  if (seekSeconds > 0) {
+    ffmpegArgs.push("-ss", seekSeconds.toString());
   }
 
-  stopProcess() {
-    if (this.currentProcess) {
-      try {
-        this.currentProcess.kill("SIGKILL");
-      } catch {}
-      this.currentProcess = null;
+  ffmpegArgs.push(
+    "-i", streamUrl,
+    "-threads", "1",
+    "-analyzeduration", "0",
+    "-loglevel", "error",
+    "-f", "s16le",
+    "-ar", "48000",
+    "-ac", "2",
+    "pipe:1"
+  );
+
+  const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+
+  return createAudioResource(ffmpeg.stdout, {
+    inputType: StreamType.Raw,
+    inlineVolume: true,
+  });
+}
+
+function clearPlayerIdleTimeout(player: BotPlayer) {
+  if (player.idleTimeout) {
+    clearTimeout(player.idleTimeout);
+    player.idleTimeout = null;
+  }
+}
+
+function setPlayerIdleTimeout(player: BotPlayer) {
+  clearPlayerIdleTimeout(player);
+  player.idleTimeout = setTimeout(() => {
+    const currentP = players.get(player.guildId);
+    if (currentP && !currentP.queue.current && currentP.queue.tracks.length === 0) {
+      stop(player.guildId);
+    }
+  }, 180_000);
+}
+
+function startTrack(player: BotPlayer, track: PlayerTrack, seekSeconds = 0) {
+  clearPlayerIdleTimeout(player);
+  player.queue.current = track;
+  player.isPaused = false;
+  try {
+    const resource = createOptimizedStream(track.streamUrl, seekSeconds);
+    player.audioPlayer.play(resource);
+  } catch (err) {
+    console.error("[AudioPlayer Play Error]", err);
+    const next = player.queue.tracks.shift();
+    if (next) startTrack(player, next);
+    else {
+      player.queue.current = null;
+      setPlayerIdleTimeout(player);
     }
   }
-
-  async playTrack(track: SearchTrack) {
-    this.stopProcess();
-    this.queue.current = track;
-    this.paused = false;
-
-    let streamUrl = track.streamUrl;
-    if (!streamUrl) {
-      const resolved = await resolveTrack(track.sourceUrl);
-      streamUrl = resolved.streamUrl;
-      track.streamUrl = streamUrl;
-    }
-
-    const ffmpeg = spawn("ffmpeg", [
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-      "-i", streamUrl,
-      "-analyzeduration", "0",
-      "-loglevel", "0",
-      "-f", "s16le",
-      "-ar", "48000",
-      "-ac", "2",
-      "pipe:1",
-    ], {
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-
-    this.currentProcess = ffmpeg;
-
-    const resource = createAudioResource(ffmpeg.stdout!, {
-      inputType: StreamType.Raw,
-      inlineVolume: true,
-    });
-    resource.volume?.setVolume(1.0);
-
-    this.audioPlayer.play(resource);
-
-    logPlayedTrack(
-      this.guildId,
-      track.info.title,
-      track.info.author,
-      track.info.uri,
-      track.userData.requester.tag,
-    );
-  }
 }
 
-const players = new Map<string, GuildPlayer>();
+export async function play(ctx: any, query?: string): Promise<{ queued: boolean; track: PlayerTrack }> {
+  const guild = requireGuild(ctx);
+  const voiceChannel = requireVoiceChannel(ctx);
+  const input = query || ctx.options?.getString?.("query") || ctx.content?.replace(/^\\\S+\s*/, "");
 
-export function requireGuild(message: Message): Guild {
-  if (!message.guild) throw new Error("คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์เท่านั้น");
-  return message.guild;
-}
+  if (!input) throw new Error("Please provide a track title or URL.");
 
-export function requireVoiceChannel(message: Message): string {
-  const channel = message.member?.voice.channel;
-  if (!channel) throw new Error("กรุณาเข้าห้องเสียงก่อนใช้งานคำสั่ง");
-  if (!channel.isVoiceBased()) throw new Error("ห้องเสียงไม่ถูกต้อง");
-  return channel.id;
-}
-
-export function getPlayer(guildId: string): GuildPlayer | null {
-  return players.get(guildId) ?? null;
-}
-
-export function getOrCreatePlayer(guild: Guild, voiceChannelId: string, textChannelId: string): GuildPlayer {
   let player = players.get(guild.id);
 
   if (!player) {
-    player = new GuildPlayer(guild.id, voiceChannelId, textChannelId);
-    players.set(guild.id, player);
-  }
-
-  if (!player.connection || player.connection.state.status === VoiceConnectionStatus.Destroyed) {
     const connection = joinVoiceChannel({
-      channelId: voiceChannelId,
+      channelId: voiceChannel.id,
       guildId: guild.id,
-      adapterCreator: guild.voiceAdapterCreator as any,
+      adapterCreator: guild.voiceAdapterCreator,
       selfDeaf: true,
-      selfMute: false,
     });
 
-    connection.subscribe(player.audioPlayer);
-    player.connection = connection;
-    player.voiceChannelId = voiceChannelId;
-  } else if (player.voiceChannelId !== voiceChannelId) {
-    player.connection.rejoin({
-      channelId: voiceChannelId,
-      selfDeaf: true,
-      selfMute: false,
-    });
-    player.voiceChannelId = voiceChannelId;
-  }
+    const audioPlayer = createAudioPlayer();
+    connection.subscribe(audioPlayer);
 
-  return player;
-}
-
-export async function play(
-  message: Message,
-  query: string,
-): Promise<{ track: SearchTrack; queued: boolean }> {
-  const guild = requireGuild(message);
-  const voiceChannelId = requireVoiceChannel(message);
-  const player = getOrCreatePlayer(guild, voiceChannelId, message.channel.id);
-
-  const resolved = await resolveTrack(query);
-
-  const track: SearchTrack = {
-    info: {
-      title: resolved.title,
-      author: resolved.uploader,
-      uri: resolved.sourceUrl,
-      duration: resolved.duration ? resolved.duration * 1000 : null,
-      artworkUrl: resolved.thumbnail,
-    },
-    streamUrl: resolved.streamUrl,
-    sourceUrl: resolved.sourceUrl,
-    userData: {
-      requester: {
-        tag: message.author.tag,
-        id: message.author.id,
+    player = {
+      guildId: guild.id,
+      voiceChannelId: voiceChannel.id,
+      connection,
+      audioPlayer,
+      repeatMode: "off",
+      isPaused: false,
+      idleTimeout: null,
+      queue: {
+        current: null,
+        tracks: [],
       },
-    },
-  };
+    };
 
-  const wasPlaying = Boolean(player.queue.current);
+    players.set(guild.id, player);
 
-  if (wasPlaying) {
-    player.queue.tracks.push(track);
-    return { track, queued: true };
+    audioPlayer.on(AudioPlayerStatus.Idle, () => {
+      const p = players.get(guild.id);
+      if (!p) return;
+
+      if (p.repeatMode === "track" && p.queue.current) {
+        startTrack(p, p.queue.current);
+      } else if (p.repeatMode === "queue" && p.queue.current) {
+        p.queue.tracks.push(p.queue.current);
+        const next = p.queue.tracks.shift();
+        if (next) startTrack(p, next);
+        else {
+          p.queue.current = null;
+          setPlayerIdleTimeout(p);
+        }
+      } else {
+        const next = p.queue.tracks.shift();
+        if (next) startTrack(p, next);
+        else {
+          p.queue.current = null;
+          setPlayerIdleTimeout(p);
+        }
+      }
+    });
+
+    audioPlayer.on("error", (err: any) => {
+      console.error(`[AudioPlayer Error ${guild.id}]`, err.message);
+      const next = player?.queue.tracks.shift();
+      if (next && player) startTrack(player, next);
+      else if (player) {
+        player.queue.current = null;
+        setPlayerIdleTimeout(player);
+      }
+    });
+
+    connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+          entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+        ]);
+      } catch {
+        stop(guild.id);
+      }
+    });
   } else {
-    await player.playTrack(track);
-    return { track, queued: false };
+    player.voiceChannelId = voiceChannel.id;
+  }
+
+  const resolved = await resolveTrack(input);
+  const track = toPlayerTrack(resolved);
+
+  if (!player.queue.current && player.queue.tracks.length === 0) {
+    startTrack(player, track);
+    return { queued: false, track };
+  } else {
+    player.queue.tracks.push(track);
+    return { queued: true, track };
   }
 }
 
-export async function pause(guildId: string): Promise<void> {
-  const player = getPlayer(guildId);
-  if (!player || !player.queue.current) throw new Error("Nothing is currently playing.");
-  if (player.paused) throw new Error("Player is already paused.");
-  player.audioPlayer.pause();
-  player.paused = true;
+export async function pause(guildId: string): Promise<boolean> {
+  const p = players.get(guildId);
+  if (!p || p.isPaused) return false;
+  p.audioPlayer.pause();
+  p.isPaused = true;
+  return true;
 }
 
-export async function resume(guildId: string): Promise<void> {
-  const player = getPlayer(guildId);
-  if (!player || !player.queue.current) throw new Error("No music player is active.");
-  if (!player.paused) throw new Error("Player is already playing.");
-  player.audioPlayer.unpause();
-  player.paused = false;
+export async function resume(guildId: string): Promise<boolean> {
+  const p = players.get(guildId);
+  if (!p || !p.isPaused) return false;
+  p.audioPlayer.unpause();
+  p.isPaused = false;
+  return true;
 }
 
-export async function skip(guildId: string): Promise<SearchTrack | null> {
-  const player = getPlayer(guildId);
-  if (!player || !player.queue.current) throw new Error("Nothing is playing to skip.");
-
-  const currentTrack = player.queue.current;
-  const tempMode = player.repeatMode;
-  if (tempMode === "track") player.repeatMode = "off";
-
-  player.stopProcess();
-  player.audioPlayer.stop();
-
-  if (tempMode === "track") player.repeatMode = "track";
-  return currentTrack;
+export async function skip(guildId: string): Promise<PlayerTrack | null> {
+  const p = players.get(guildId);
+  if (!p) return null;
+  const current = p.queue.current;
+  p.audioPlayer.stop();
+  return current;
 }
 
-export async function stop(guildId: string): Promise<void> {
-  const player = getPlayer(guildId);
-  if (!player) return;
-
-  player.queue.tracks = [];
-  player.queue.current = null;
-  player.stopProcess();
-  player.audioPlayer.stop();
-
-  if (player.connection) {
-    player.connection.destroy();
-    player.connection = null;
-  }
+export async function stop(guildId: string): Promise<boolean> {
+  const p = players.get(guildId);
+  if (!p) return false;
+  clearPlayerIdleTimeout(p);
+  p.queue.tracks = [];
+  p.queue.current = null;
+  p.audioPlayer.stop();
+  p.connection.destroy();
   players.delete(guildId);
-}
-
-export function toggleLoop(guildId: string): RepeatMode {
-  const player = getPlayer(guildId);
-  if (!player || !player.queue.current) throw new Error("Nothing is currently playing.");
-
-  if (player.repeatMode === "off") player.repeatMode = "track";
-  else if (player.repeatMode === "track") player.repeatMode = "queue";
-  else player.repeatMode = "off";
-
-  return player.repeatMode;
-}
-
-export function shuffleQueue(guildId: string): number {
-  const player = getPlayer(guildId);
-  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is empty.");
-
-  for (let i = player.queue.tracks.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const temp = player.queue.tracks[i]!;
-    player.queue.tracks[i] = player.queue.tracks[j]!;
-    player.queue.tracks[j] = temp;
-  }
-  return player.queue.tracks.length;
+  return true;
 }
 
 export function clearQueue(guildId: string): number {
-  const player = getPlayer(guildId);
-  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is already empty.");
-
-  const count = player.queue.tracks.length;
-  player.queue.tracks = [];
+  const p = players.get(guildId);
+  if (!p) return 0;
+  const count = p.queue.tracks.length;
+  p.queue.tracks = [];
   return count;
 }
 
-export function removeQueueTrack(guildId: string, index: number): SearchTrack {
-  const player = getPlayer(guildId);
-  if (!player || player.queue.tracks.length === 0) throw new Error("Queue is empty.");
+export function shuffleQueue(guildId: string): number {
+  const p = players.get(guildId);
+  if (!p || p.queue.tracks.length === 0) return 0;
+  p.queue.tracks.sort(() => Math.random() - 0.5);
+  return p.queue.tracks.length;
+}
 
-  if (index < 1 || index > player.queue.tracks.length) {
-    throw new Error(`Invalid track number. Choose 1 to ${player.queue.tracks.length}.`);
+export function toggleLoop(guildId: string): "off" | "track" | "queue" {
+  const p = players.get(guildId);
+  if (!p) return "off";
+  if (p.repeatMode === "off") p.repeatMode = "track";
+  else if (p.repeatMode === "track") p.repeatMode = "queue";
+  else p.repeatMode = "off";
+  return p.repeatMode;
+}
+
+export function removeQueueTrack(guildId: string, index: number): PlayerTrack {
+  const p = players.get(guildId);
+  if (!p || p.queue.tracks.length === 0) {
+    throw new Error("The queue is currently empty.");
   }
+  const idx = index > 0 ? index - 1 : index;
+  if (idx < 0 || idx >= p.queue.tracks.length) {
+    throw new Error(`Track index ${index} not found.`);
+  }
+  const removed = p.queue.tracks.splice(idx, 1);
+  const track = removed[0];
+  if (!track) throw new Error("An error occurred while removing the track.");
+  return track;
+}
 
-  const removed = player.queue.tracks.splice(index - 1, 1)[0];
-  if (!removed) throw new Error("Failed to remove track.");
-  return removed;
+export function seek(guildId: string, seconds: number): boolean {
+  const p = players.get(guildId);
+  if (!p || !p.queue.current) return false;
+  startTrack(p, p.queue.current, seconds);
+  return true;
 }

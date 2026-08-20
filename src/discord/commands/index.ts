@@ -1,45 +1,49 @@
 import type { BotCommand } from "./types";
 import { playCommand } from "./play";
-import { skipCommand } from "./skip";
 import { pauseCommand } from "./pause";
 import { resumeCommand } from "./resume";
+import { skipCommand } from "./skip";
 import { stopCommand } from "./stop";
 import { queueCommand } from "./queue";
 import { nowPlayingCommand } from "./nowplaying";
-import { loopCommand } from "./loop";
-import { shuffleCommand } from "./shuffle";
 import { clearCommand } from "./clear";
+import { loopCommand } from "./loop";
 import { removeCommand } from "./remove";
-import { helpCommand } from "./help";
+import { shuffleCommand } from "./shuffle";
 import { pingCommand } from "./ping";
+import { lyricsCommand } from "./lyrics";
+import { seekCommand } from "./seek";
+import { helpCommand } from "./help";
 
 export const commands: BotCommand[] = [
   playCommand,
-  skipCommand,
   pauseCommand,
   resumeCommand,
+  skipCommand,
   stopCommand,
   queueCommand,
   nowPlayingCommand,
-  loopCommand,
-  shuffleCommand,
   clearCommand,
+  loopCommand,
   removeCommand,
-  helpCommand,
+  shuffleCommand,
   pingCommand,
+  lyricsCommand,
+  seekCommand,
+  helpCommand,
 ];
 
 export const commandMap = new Map<string, BotCommand>();
 
-for (const command of commands) {
-  commandMap.set(command.name, command);
+// Register main commands
+for (const cmd of commands) {
+  commandMap.set(cmd.name.toLowerCase(), cmd);
 }
 
-// Aliases
-commandMap.set("next", skipCommand);
-commandMap.set("leave", stopCommand);
-commandMap.set("q", queueCommand);
+// Register shortcut aliases for quick typing
+commandMap.set("p", playCommand);
+commandMap.set("s", skipCommand);
 commandMap.set("np", nowPlayingCommand);
-commandMap.set("repeat", loopCommand);
+commandMap.set("q", queueCommand);
 commandMap.set("h", helpCommand);
-commandMap.set("latency", pingCommand);
+commandMap.set("l", lyricsCommand);
