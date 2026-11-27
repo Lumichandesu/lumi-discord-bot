@@ -99,6 +99,8 @@ struct YtDlpJson {
     protocol: Option<String>,
     http_headers: Option<HashMap<String, String>>,
     filesize: Option<u64>,
+    is_live: Option<bool>,
+    live_status: Option<String>,
     entries: Option<Vec<YtDlpJson>>,
 }
 
@@ -111,6 +113,10 @@ pub fn parse_ytdlp_json(raw: &str, fallback_url: &str) -> Result<Track, String> 
         Some(_) => return Err("No results found.".into()),
         None => parsed,
     };
+    // Live and DVR streams only offer MPEG-TS over HLS, which symphonia cannot demux.
+    if entry.is_live == Some(true) || matches!(entry.live_status.as_deref(), Some("is_live" | "is_upcoming" | "post_live")) {
+        return Err("Live streams are not supported.".into());
+    }
     let stream_url = entry.url.filter(|u| u.starts_with("http")).ok_or("No suitable audio stream found.")?;
     Ok(Track {
         title: entry.title.unwrap_or_else(|| "Unknown Title".into()),
@@ -583,5 +589,9 @@ mod tests {
         assert!(parse_ytdlp_json(r#"{"entries":[]}"#, "x").is_err());
         assert!(parse_ytdlp_json(r#"{"title":"no url"}"#, "x").is_err());
         assert!(parse_ytdlp_json("not json", "x").is_err());
+        for live in [r#"{"url":"https://a/b.m3u8","is_live":true}"#, r#"{"url":"https://a/b","live_status":"is_upcoming"}"#] {
+            assert_eq!(parse_ytdlp_json(live, "x").unwrap_err(), "Live streams are not supported.");
+        }
+        assert!(parse_ytdlp_json(r#"{"url":"https://a/b","live_status":"was_live"}"#, "x").is_ok());
     }
 }

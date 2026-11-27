@@ -96,6 +96,9 @@ impl Bot {
     /// Resolves the query, joins the voice channel if needed, and starts or queues the track.
     pub async fn play(self: &Arc<Self>, guild: GuildId, channel: ChannelId, query: &str) -> Result<PlayOutcome, String> {
         let track = self.resolver.resolve(query).await?;
+        if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
+            self.probe(&track).await?;
+        }
 
         if !self.has_player(guild) {
             let lock = self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone();
@@ -189,6 +192,21 @@ impl Bot {
                 p.handle = Some(handle);
             }
         });
+    }
+
+    /// Opens an HLS stream and lets symphonia probe it, so formats it cannot demux (MPEG-TS
+    /// segments) fail with a message here instead of being skipped silently after the reply.
+    async fn probe(&self, track: &Track) -> Result<(), String> {
+        use songbird::input::codecs::{get_codec_registry, get_probe};
+        let probe = self.input_for(track).make_playable_async(get_codec_registry(), get_probe());
+        match tokio::time::timeout(Duration::from_secs(15), probe).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => {
+                tracing::warn!("probe failed for {}: {e}", track.url);
+                Err("This stream format is not supported (live streams and MPEG-TS HLS cannot be played).".into())
+            }
+            Err(_) => Err("The audio stream took too long to open.".into()),
+        }
     }
 
     pub fn input_for(&self, track: &Track) -> Input {
