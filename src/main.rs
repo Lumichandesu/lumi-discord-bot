@@ -6,6 +6,7 @@ mod lyrics;
 mod player;
 mod queue;
 mod resolver;
+mod roles;
 mod stats;
 mod util;
 
@@ -86,6 +87,16 @@ impl Handler {
 
     async fn on_prefix(&self, ctx: &Context, msg: &Message) {
         let Some((typed, args)) = commands::parse_prefix(&msg.content) else { return };
+        // Posts the role panel; prefix-only and not listed in help, as in the old bot.
+        if matches!(typed.to_lowercase().as_str(), "sendroles" | "send-roles") {
+            match roles::send_panel(ctx).await {
+                Ok(()) => {
+                    let _ = msg.reply(&ctx.http, "✅ ส่งแผงรับยศเข้าห้องเรียบร้อยแล้ว!").await;
+                }
+                Err(e) => tracing::error!("Role panel channel not found or is not text based: {e}"),
+            }
+            return;
+        }
         let Some(name) = commands::canonical(typed) else { return };
 
         if matches!(name, "play" | "lyrics") {
@@ -224,6 +235,9 @@ impl Handler {
                     .ephemeral(true),
             )
         };
+        if i.data.custom_id.starts_with(roles::BUTTON_PREFIX) {
+            return roles::on_button(ctx, i).await;
+        }
         let Some(guild) = i.guild_id else { return };
         if !self.bot.has_player(guild) {
             let _ = i.create_response(&ctx.http, ephemeral("❌ No active player in this server.".into())).await;
@@ -367,6 +381,9 @@ impl EventHandler for Handler {
         match interaction {
             Interaction::Command(cmd) => self.on_slash(&ctx, &cmd).await,
             Interaction::Component(i) => self.on_button(&ctx, &i).await,
+            Interaction::Modal(m) => {
+                roles::on_modal(&ctx, &m).await;
+            }
             _ => {}
         }
     }
