@@ -49,7 +49,7 @@ struct Proc {
     pending: Pending,
     alive: Arc<AtomicBool>,
     last_used: Arc<Mutex<Instant>>,
-    _child: Child,
+    child: Child,
 }
 
 struct State {
@@ -109,6 +109,11 @@ impl Worker {
         {
             *p.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
         }
+    }
+
+    /// Process id of the running worker, for the self-test's memory report.
+    pub async fn pid(&self) -> Option<u32> {
+        self.state.lock().await.proc.as_ref().and_then(|p| p.child.id())
     }
 
     /// Runs yt-dlp on `target`. The inner result is yt-dlp's answer (the JSON info, or the error
@@ -250,7 +255,7 @@ impl Worker {
             // Dropping the senders fails every request still waiting.
             pending2.lock().unwrap_or_else(|e| e.into_inner()).clear();
         });
-        let proc = Proc { stdin, pending, alive, last_used: Arc::new(Mutex::new(Instant::now())), _child: child };
+        let proc = Proc { stdin, pending, alive, last_used: Arc::new(Mutex::new(Instant::now())), child };
         Ok((proc, hello.version.unwrap_or_default()))
     }
 

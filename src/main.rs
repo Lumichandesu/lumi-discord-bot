@@ -440,9 +440,12 @@ async fn deploy(config: &Config) -> Result<(), String> {
 }
 
 /// Checks the parts that do not need Discord: yt-dlp search, the stream URL, and audio probing.
+/// Also times each lookup path: spawned yt-dlp, the warm worker (cold and warm), the InnerTube
+/// search, and a prefetch of a stale next track.
 async fn selftest() -> Result<(), String> {
     let http = http_client();
-    let resolver = resolver::Resolver::new(http.clone());
+    let bot = Arc::new(Bot::new(songbird::Songbird::serenity(), http, None));
+    let resolver = &bot.resolver;
     let probe = tokio::process::Command::new(resolver.ytdlp_program()).arg("--version").output().await;
     let version = match probe {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -452,24 +455,61 @@ async fn selftest() -> Result<(), String> {
         }
     };
     println!("yt-dlp {version}");
+    let secs = |t: Instant| t.elapsed().as_secs_f32();
+
+    let started = Instant::now();
+    resolver.extract_spawned("ytsearch1:yoasobi idol").await?;
+    println!("spawned yt-dlp search (old path) in {:.2}s", secs(started));
 
     let started = Instant::now();
     let track = resolver.resolve("rick astley never gonna give you up").await?;
     println!(
-        "resolved in {:.1}s: {} | {} | {} | protocol {}",
-        started.elapsed().as_secs_f32(),
+        "cold resolve (worker start + search) in {:.2}s: {} | {} | {} | protocol {}",
+        secs(started),
         track.title,
         track.author,
         format_duration(track.duration),
         track.protocol.as_deref().unwrap_or("?")
     );
+    if !resolver.worker.is_usable() {
+        println!("yt-dlp worker not available here; lookups spawn yt-dlp");
+    }
+    let started = Instant::now();
+    let id = resolver.innertube_search("yoasobi idol").await?;
+    println!("InnerTube search in {:.2}s: {}", secs(started), id.as_deref().unwrap_or("no result"));
+    for query in ["yoasobi idol", "aimer kataomoi"] {
+        let started = Instant::now();
+        let t = resolver.resolve(query).await?;
+        println!("warm resolve {query:?} in {:.2}s: {}", secs(started), t.title);
+    }
+    let started = Instant::now();
+    resolver.resolve(&track.url).await?;
+    println!("warm resolve of a watch URL in {:.2}s", secs(started));
     let cached = Instant::now();
     resolver.resolve("Rick Astley never gonna give you up ").await?;
     println!("cache hit in {} us", cached.elapsed().as_micros());
 
+    // A queue whose next track's stream URL is 40 minutes old, as after a long session.
+    let guild = GuildId::new(1);
+    let mut stale = resolver.resolve("aimer kataomoi").await?;
+    stale.resolved_at = Instant::now().checked_sub(Duration::from_secs(40 * 60)).unwrap_or(stale.resolved_at);
+    bot.players().entry(guild).or_default().queue.current = Some(track.clone());
+    bot.players().entry(guild).or_default().queue.upcoming.push_back(stale);
+    let started = Instant::now();
+    if let Some(task) = bot.prefetch_next(guild, track.duration) {
+        let _ = task.await;
+    }
+    let fresh = bot.with_player(guild, |p| p.queue.upcoming.front().map(|t| t.resolved_at.elapsed())).flatten();
+    match fresh {
+        Some(age) if age < Duration::from_secs(60) => println!(
+            "prefetch refreshed the stale next track in {:.2}s while the current one played; the skip waits 0s",
+            secs(started)
+        ),
+        _ => return Err("prefetch did not refresh the next track".into()),
+    }
+    bot.players().remove(&guild);
+
     // Open the stream the same way playback does and let songbird/symphonia probe the format.
-    let songbird = songbird::Songbird::serenity();
-    let bot = Bot::new(songbird, http, None);
     let mut input = bot.input_for(&track);
     let started = Instant::now();
     input = input
@@ -485,7 +525,13 @@ async fn selftest() -> Result<(), String> {
         }
         _ => "unknown".into(),
     };
-    println!("audio stream opened and probed in {:.1}s (codec {codec})", started.elapsed().as_secs_f32());
+    println!("audio stream opened and probed in {:.1}s (codec {codec})", secs(started));
+    if let Some(pid) = resolver.worker.pid().await {
+        let rss = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:")).map(|l| l.trim_start_matches("VmRSS:").trim().to_string()));
+        println!("yt-dlp worker pid {pid}, RSS {}", rss.as_deref().unwrap_or("n/a"));
+    }
     println!("SELFTEST OK");
     Ok(())
 }
