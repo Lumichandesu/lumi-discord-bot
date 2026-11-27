@@ -1,6 +1,6 @@
 # Lumi Discord Bot: a self-hosted Discord music bot in Rust
 
-Lumi is a self-hosted Discord music bot written in Rust with serenity and songbird. It plays audio in voice channels from YouTube and SoundCloud links or plain search text, using yt-dlp to find the audio stream. Spotify, Apple Music and TIDAL links are read only for the track title and artist; the audio then comes from a YouTube search for that text. It runs as a single binary with no Lavalink server and no FFmpeg.
+Lumi is a self-hosted Discord music bot written in Rust with serenity and songbird. It plays audio in voice channels from YouTube and SoundCloud links or plain search text, using yt-dlp to find the audio stream. Spotify, Apple Music and TIDAL links are read only for the track title and artist; the audio then comes from a YouTube search for that text. It runs as a single binary with no Lavalink server. Live streams and other HLS sources are decoded by FFmpeg; everything else plays without it.
 
 
 ## Features
@@ -35,7 +35,7 @@ The slash commands have the same names, for example `/play query:...` and `/seek
 
 ## Setup
 
-1. Install Rust (https://rustup.rs) and yt-dlp (https://github.com/yt-dlp/yt-dlp). FFmpeg is not needed.
+1. Install Rust (https://rustup.rs) and yt-dlp (https://github.com/yt-dlp/yt-dlp). Install FFmpeg too if you want live streams and HLS sources to play.
 2. Create a bot application in the Discord Developer Portal and enable the Message Content intent, which the prefix commands need.
 3. Copy `.env.example` to `.env` and fill it in. Never commit `.env`.
 
@@ -45,6 +45,7 @@ The slash commands have the same names, for example `/play query:...` and `/seek
    | `DISCORD_CLIENT_ID` | for `--deploy` | Application ID |
    | `DISCORD_GUILD_ID` | no | With `--deploy`, register commands in this server only (updates instantly) instead of globally |
    | `YTDLP_PATH` | no | Path to the yt-dlp program; otherwise `~/bin/yt-dlp`, then `yt-dlp` on `PATH` |
+| `FFMPEG_PATH` | no | Path to the ffmpeg program used for live streams and HLS; otherwise `ffmpeg` on `PATH` |
    | `RUST_LOG` | no | Log filter, default `lumi_discord_bot=info,serenity=warn,songbird=warn` |
 
 4. Build and run:

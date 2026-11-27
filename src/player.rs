@@ -8,9 +8,10 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId, Http, ShardManager, UserId};
 use serenity::async_trait;
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent};
-use songbird::input::{HlsRequest, HttpRequest, Input};
+use songbird::input::{ChildContainer, HlsRequest, HttpRequest, Input, RawAdapter};
 use songbird::tracks::TrackHandle;
 use songbird::Songbird;
+use symphonia::core::io::ReadOnlySource;
 use tokio::task::JoinHandle;
 
 use crate::embed;
@@ -129,9 +130,6 @@ impl Bot {
         }
         let mut track = self.resolver.resolve(query).await?;
         track.requester = Some(user);
-        if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
-            self.probe(&track).await?;
-        }
 
         if !self.has_player(guild) {
             let lock = self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone();
@@ -260,21 +258,6 @@ impl Bot {
         }
     }
 
-    /// Opens an HLS stream and lets symphonia probe it, so formats it cannot demux (MPEG-TS
-    /// segments) fail with a message here instead of being skipped silently after the reply.
-    async fn probe(&self, track: &Track) -> Result<(), String> {
-        use songbird::input::codecs::{get_codec_registry, get_probe};
-        let probe = self.input_for(track).make_playable_async(get_codec_registry(), get_probe());
-        match tokio::time::timeout(Duration::from_secs(15), probe).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => {
-                tracing::warn!("probe failed for {}: {e}", track.url);
-                Err("This stream format is not supported (live streams and MPEG-TS HLS cannot be played).".into())
-            }
-            Err(_) => Err("The audio stream took too long to open.".into()),
-        }
-    }
-
     pub fn input_for(&self, track: &Track) -> Input {
         let headers: HeaderMap = track
             .http_headers
@@ -282,6 +265,15 @@ impl Bot {
             .filter_map(|(k, v)| Some((HeaderName::from_bytes(k.as_bytes()).ok()?, HeaderValue::from_str(v).ok()?)))
             .collect();
         if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
+            // Live streams and many HLS sources use MPEG-TS segments, which symphonia cannot
+            // demux, so ffmpeg decodes HLS to raw PCM, as the old bot did for every stream.
+            match spawn_ffmpeg(track) {
+                Ok(child) => {
+                    let source = ReadOnlySource::new(ChildContainer::from(child));
+                    return RawAdapter::new(source, 48_000, 2).into();
+                }
+                Err(e) => tracing::warn!("could not start ffmpeg ({e}); opening the HLS stream directly"),
+            }
             HlsRequest::new_with_headers(self.http.clone(), track.stream_url.clone(), headers).into()
         } else {
             HttpRequest { client: self.http.clone(), request: track.stream_url.clone(), headers, content_length: track.filesize }
@@ -437,6 +429,31 @@ struct TrackEnded {
     guild: GuildId,
     generation: u64,
     failed: bool,
+}
+
+/// Starts ffmpeg reading the stream and writing 48 kHz stereo f32 PCM to stdout.
+/// `FFMPEG_PATH` overrides the program, which is otherwise `ffmpeg` on PATH.
+fn spawn_ffmpeg(track: &Track) -> std::io::Result<std::process::Child> {
+    let program = std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
+    cmd.args(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]);
+    // Only network protocols, so a playlist cannot point ffmpeg at local files.
+    cmd.args(["-protocol_whitelist", "http,https,tls,tcp,crypto"]);
+    let mut extra = String::new();
+    for (k, v) in &track.http_headers {
+        if k.eq_ignore_ascii_case("user-agent") {
+            cmd.args(["-user_agent", v]);
+        } else if !k.contains(['\r', '\n']) && !v.contains(['\r', '\n']) {
+            extra.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    if !extra.is_empty() {
+        cmd.args(["-headers", &extra]);
+    }
+    cmd.args(["-i", &track.stream_url, "-vn", "-threads", "1", "-f", "f32le", "-ar", "48000", "-ac", "2", "pipe:1"]);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    cmd.spawn()
 }
 
 #[async_trait]
