@@ -208,6 +208,7 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, guild: Option<GuildId>, name
         }
         "loop" => {
             let mode = bot.with_player(g()?, |p| p.queue.cycle_repeat()).unwrap_or_default();
+            bot.queue_changed(g()?);
             Reply::text(format!("🔁 Loop mode set to: **{}**", mode.as_str().to_uppercase()))
         }
         "remove" => {
@@ -217,6 +218,7 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, guild: Option<GuildId>, name
             let removed = bot
                 .with_player(g()?, |p| p.queue.remove(position))
                 .unwrap_or_else(|| Err("The queue is currently empty.".into()));
+            bot.queue_changed(g()?);
             match removed {
                 Ok(t) => Reply::text(format!("🗑️ Removed: **{}**", t.title)),
                 Err(e) => Reply { ephemeral: inv.slash, ..Reply::text(format!("❌ {e}")) },
@@ -224,6 +226,7 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, guild: Option<GuildId>, name
         }
         "shuffle" => {
             let n = bot.with_player(g()?, |p| p.queue.shuffle(&mut fastrand::Rng::new())).unwrap_or(0);
+            bot.queue_changed(g()?);
             Reply::text(if n > 0 { format!("🔀 Shuffled **{n}** tracks.") } else { "❌ Queue is empty.".into() })
         }
         "ping" => Reply::embed(ping_embed(bot, inv)),

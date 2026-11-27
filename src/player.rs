@@ -26,6 +26,9 @@ const IDLE_LEAVE: Duration = Duration::from_secs(180);
 const STREAM_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 /// A prefetch also covers a track that will turn stale within this long after the current one.
 const PREFETCH_SLACK: Duration = Duration::from_secs(60);
+/// The voice join starts this long after the lookup, so a lookup that fails at once (a bad or
+/// private link) never joins the channel; any other lookup takes longer anyway.
+const JOIN_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 pub struct GuildPlayer {
@@ -80,6 +83,33 @@ pub struct Bot {
     /// One lock per guild so two play commands cannot join the same channel at once
     /// (songbird cancels an in-progress join when a second one starts).
     join_locks: Mutex<HashMap<GuildId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Play commands still running, per guild.
+    in_flight: Mutex<HashMap<GuildId, Flight>>,
+}
+
+#[derive(Default)]
+struct Flight {
+    count: usize,
+    /// One of them joined the voice channel and nothing has been queued since.
+    joined: bool,
+}
+
+/// Counts a running play command until it is dropped.
+struct InFlight<'a> {
+    bot: &'a Bot,
+    guild: GuildId,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut flights = self.bot.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = flights.get_mut(&self.guild) {
+            f.count -= 1;
+            if f.count == 0 {
+                flights.remove(&self.guild);
+            }
+        }
+    }
 }
 
 pub struct PlayOutcome {
@@ -99,6 +129,7 @@ impl Bot {
             stats: stats.map(Arc::new),
             players: Mutex::new(HashMap::new()),
             join_locks: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -135,26 +166,19 @@ impl Bot {
         if self.with_player(guild, |p| p.queue.is_full()) == Some(true) {
             return Err(queue_full());
         }
+        let _flight = self.enter_flight(guild);
         // Join the voice channel while the track resolves; both take a second or more.
-        let join = async {
-            if self.has_player(guild) {
-                return Ok(false);
-            }
-            let lock = self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone();
-            let _joining = lock.lock().await;
-            if self.has_player(guild) {
-                return Ok(false);
-            }
-            self.join(guild, channel).await.map(|()| true)
+        let resolve = self.resolver.resolve(query);
+        tokio::pin!(resolve);
+        let (resolved, joined) = match tokio::time::timeout(JOIN_DELAY, &mut resolve).await {
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(track)) => (Ok(track), self.join_if_needed(guild, channel).await),
+            Err(_) => tokio::join!(resolve, self.join_if_needed(guild, channel)),
         };
-        let (resolved, joined) = tokio::join!(self.resolver.resolve(query), join);
         let mut track = match resolved {
             Ok(track) => track,
             Err(e) => {
-                // Leave again if this command joined and nothing else started meanwhile.
-                if joined == Ok(true) && self.with_player(guild, |p| p.queue.is_idle()) == Some(true) {
-                    self.stop(guild).await;
-                }
+                self.leave_if_unused(guild).await;
                 return Err(e);
             }
         };
@@ -170,10 +194,61 @@ impl Bot {
             player.text_channel = Some(text_channel);
             player.queue.enqueue(track.clone())
         };
+        self.flight(guild, |f| f.joined = false);
         if start_now {
             self.play_current(guild, Start::First).await;
+        } else {
+            self.queue_changed(guild);
         }
         Ok(PlayOutcome { queued: !start_now, track })
+    }
+
+    fn enter_flight(&self, guild: GuildId) -> InFlight<'_> {
+        self.flight(guild, |f| f.count += 1);
+        InFlight { bot: self, guild }
+    }
+
+    fn flight<R>(&self, guild: GuildId, f: impl FnOnce(&mut Flight) -> R) -> R {
+        f(self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default())
+    }
+
+    fn join_lock(&self, guild: GuildId) -> Arc<tokio::sync::Mutex<()>> {
+        self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone()
+    }
+
+    /// Joins the voice channel unless the bot already has a player in the guild. Returns whether
+    /// it joined.
+    async fn join_if_needed(self: &Arc<Self>, guild: GuildId, channel: ChannelId) -> Result<bool, String> {
+        let lock = self.join_lock(guild);
+        let _joining = lock.lock().await;
+        if self.has_player(guild) {
+            return Ok(false);
+        }
+        self.join(guild, channel).await?;
+        self.flight(guild, |f| f.joined = true);
+        Ok(true)
+    }
+
+    /// After a failed lookup, leaves the voice channel if a play command joined it and nothing
+    /// came of it: no other play command is still running in the guild and nothing is queued.
+    async fn leave_if_unused(&self, guild: GuildId) {
+        // Held while leaving, so another play command cannot use the player being removed.
+        let lock = self.join_lock(guild);
+        let _joining = lock.lock().await;
+        let unused = self.flight(guild, |f| f.count == 1 && f.joined);
+        if unused && self.with_player(guild, |p| p.queue.is_idle()) == Some(true) {
+            self.stop(guild).await;
+        }
+    }
+
+    /// Refreshes, in the background, a next track that a queue change made stale, as a track
+    /// start does.
+    pub fn queue_changed(self: &Arc<Self>, guild: GuildId) {
+        let playing_for =
+            self.with_player(guild, |p| p.handle.as_ref().and(p.queue.current.as_ref()).map(|t| t.duration)).flatten();
+        if let Some(playing_for) = playing_for {
+            self.prefetch_next(guild, playing_for);
+        }
     }
 
     async fn join(self: &Arc<Self>, guild: GuildId, channel: ChannelId) -> Result<(), String> {
