@@ -8,7 +8,6 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct Lyrics {
     pub track_name: Option<String>,
-    pub artist_name: Option<String>,
     pub plain_lyrics: Option<String>,
 }
 

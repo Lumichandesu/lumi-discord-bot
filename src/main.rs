@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use serenity::all::{
     ActivityData, ApplicationId, Command, CommandDataOptionValue, CommandInteraction, ComponentInteraction,
     Context, CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
-    CreateMessage, EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Http, Interaction, Message, Ready,
-    UserId, VoiceState,
+    CreateMessage, EditInteractionResponse, EditMessage, EventHandler, GatewayIntents, GuildId, Http, Interaction, Message,
+    OnlineStatus, Ready, UserId, VoiceState,
 };
 use serenity::{Client, async_trait};
 use songbird::SerenityInit;
@@ -88,9 +88,18 @@ impl Handler {
         let Some((typed, args)) = commands::parse_prefix(&msg.content) else { return };
         let Some(name) = commands::canonical(typed) else { return };
 
-        let started = Instant::now();
-        if matches!(name, "play" | "lyrics" | "ping") {
+        if matches!(name, "play" | "lyrics") {
             let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+        }
+        // Like the old bot, ping first sends a placeholder and measures that round trip.
+        let started = Instant::now();
+        let mut placeholder = None;
+        if name == "ping" {
+            let out = CreateMessage::new().content("🏓 Pinging...").reference_message(msg);
+            match msg.channel_id.send_message(&ctx.http, out).await {
+                Ok(m) => placeholder = Some(m),
+                Err(e) => return tracing::warn!("could not reply to \\ping: {e}"),
+            }
         }
         let inv = Invocation {
             guild: msg.guild_id,
@@ -100,11 +109,22 @@ impl Handler {
             guild_name: Self::guild_name(ctx, msg.guild_id),
             username: msg.author.name.clone(),
             target_user: None,
+            slash: false,
             bot_channel: Self::bot_channel(ctx, msg.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
         let reply = commands::run(&self.bot, &inv, name, args).await;
+        if reply.silent {
+            return;
+        }
+        if let (Some(mut m), Some(e)) = (placeholder, reply.embed.clone()) {
+            let edit = EditMessage::new().content("").embed(e);
+            if let Err(e) = m.edit(&ctx.http, edit).await {
+                tracing::warn!("could not answer \\ping: {e}");
+            }
+            return;
+        }
 
         // Replies echo user text and track titles: never let them ping @everyone, roles or users.
         let mut out = CreateMessage::new()
@@ -123,7 +143,11 @@ impl Handler {
     }
 
     async fn on_slash(&self, ctx: &Context, cmd: &CommandInteraction) {
-        let Some(name) = commands::canonical(&cmd.data.name) else { return };
+        let Some(name) = commands::canonical(&cmd.data.name).filter(|n| *n == cmd.data.name.to_lowercase()) else {
+            let msg = CreateInteractionResponseMessage::new().content("❌ Command not found.").ephemeral(true);
+            let _ = cmd.create_response(&ctx.http, CreateInteractionResponse::Message(msg)).await;
+            return;
+        };
         let args = cmd
             .data
             .options
@@ -155,16 +179,21 @@ impl Handler {
             guild_name: Self::guild_name(ctx, cmd.guild_id),
             username: cmd.user.name.clone(),
             target_user,
+            slash: true,
             bot_channel: Self::bot_channel(ctx, cmd.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
         let reply = commands::run(&self.bot, &inv, name, args.trim()).await;
-        if reply.error {
-            // The deferred reply is public; replace it with an error only the caller sees.
+        if reply.silent {
+            let _ = cmd.delete_response(&ctx.http).await;
+            return;
+        }
+        if reply.ephemeral {
+            // The deferred reply is public; replace it with a reply only the caller sees.
             let _ = cmd.delete_response(&ctx.http).await;
             let followup = CreateInteractionResponseFollowup::new()
-                .content(truncate_chars(reply.content.as_deref().unwrap_or("❌ Error."), MESSAGE_MAX))
+                .content(truncate_chars(reply.content.as_deref().unwrap_or("❌ An error occurred."), MESSAGE_MAX))
                 .allowed_mentions(CreateAllowedMentions::new())
                 .ephemeral(true);
             if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
@@ -195,10 +224,11 @@ impl Handler {
                     .ephemeral(true),
             )
         };
-        let Some(guild) = i.guild_id.filter(|g| self.bot.has_player(*g)) else {
-            let _ = i.create_response(&ctx.http, ephemeral("❌ No active music player.".into())).await;
+        let Some(guild) = i.guild_id else { return };
+        if !self.bot.has_player(guild) {
+            let _ = i.create_response(&ctx.http, ephemeral("❌ No active player in this server.".into())).await;
             return;
-        };
+        }
         let bot = &self.bot;
         // Rebuilds the now-playing message after a state change; `None` when nothing is playing.
         let refreshed = || {
@@ -214,14 +244,10 @@ impl Handler {
         };
 
         let id = i.data.custom_id.as_str();
-        if matches!(id, "btn_pause" | "btn_skip" | "btn_loop" | "btn_shuffle" | "btn_stop") {
-            let caller = Self::voice_channel(ctx, Some(guild), i.user.id);
-            let bot_channel = Self::bot_channel(ctx, Some(guild));
-            if caller.is_none() || bot_channel.is_some_and(|b| Some(b) != caller) {
-                let text = "❌ You must be in the bot's voice channel to use these controls.";
-                let _ = i.create_response(&ctx.http, ephemeral(text.into())).await;
-                return;
-            }
+        let caller = Self::voice_channel(ctx, Some(guild), i.user.id);
+        if caller.is_none() || Self::bot_channel(ctx, Some(guild)) != caller {
+            let _ = i.create_response(&ctx.http, ephemeral("❌ You must be in the same voice channel.".into())).await;
+            return;
         }
         let response = match id {
             "btn_pause" => {
@@ -231,24 +257,21 @@ impl Handler {
             }
             "btn_skip" => match bot.skip(guild) {
                 Some(t) => ephemeral(format!("⏭️ Skipped: **{}**", t.title)),
-                None => ephemeral("❌ Nothing is playing.".into()),
+                None => ephemeral("❌ No track to skip.".into()),
             },
             "btn_loop" => {
                 let mode = bot.with_player(guild, |p| p.queue.cycle_repeat()).unwrap_or_default();
                 refreshed().unwrap_or_else(|| ephemeral(format!("🔁 Loop mode: `{}`", mode.as_str().to_uppercase())))
             }
             "btn_shuffle" => {
-                bot.with_player(guild, |p| p.queue.shuffle(&mut fastrand::Rng::new()));
-                ephemeral("🔀 Queue shuffled.".into())
+                let n = bot.with_player(guild, |p| p.queue.shuffle(&mut fastrand::Rng::new())).unwrap_or(0);
+                ephemeral(if n > 0 { format!("🔀 Shuffled **{n}** tracks.") } else { "❌ Queue is empty.".into() })
             }
             "btn_stop" => {
                 bot.stop(guild).await;
                 ephemeral("⏹️ Playback stopped and disconnected.".into())
             }
-            "btn_queue" => {
-                let text = bot.with_player(guild, |p| commands::queue_text(p, 8, true)).flatten();
-                ephemeral(text.unwrap_or_else(|| "📭 Queue is empty.".into()))
-            }
+            "btn_queue" => ephemeral(bot.with_player(guild, |p| commands::queue_button_text(p)).unwrap_or_default()),
             "btn_lyrics" => return self.button_lyrics(ctx, i, guild).await,
             _ => return,
         };
@@ -269,17 +292,14 @@ impl Handler {
             return;
         }
         let query = commands::current_query(&self.bot, guild).unwrap_or_else(|| title.clone());
-        let title = truncate_chars(&title, 100);
         let text = match lyrics::search(&self.bot.http, &query, Duration::from_secs(4)).await {
             Ok(Some(l)) => {
-                let header = format!("📝 **Lyrics for {title}:**\n\n");
-                let room = MESSAGE_MAX - header.chars().count();
-                format!("{header}{}", truncate_chars(l.plain_lyrics.as_deref().unwrap_or(""), room))
+                format!("📝 **Lyrics for {title}:**\n\n{}", truncate_chars(l.plain_lyrics.as_deref().unwrap_or(""), 1900))
             }
             _ => format!("❌ No lyrics found for **{title}**."),
         };
         let followup = CreateInteractionResponseFollowup::new()
-            .content(text)
+            .content(truncate_chars(&text, MESSAGE_MAX))
             .allowed_mentions(CreateAllowedMentions::new())
             .ephemeral(true);
         if let Err(e) = i.create_followup(&ctx.http, followup).await {
@@ -313,16 +333,26 @@ impl EventHandler for Handler {
         if self.presence_started.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Like the old bot: drop guild-scoped commands, then sync the global set on every start.
+        for guild in &ready.guilds {
+            let _ = guild.id.set_commands(&ctx.http, Vec::new()).await;
+        }
+        match Command::set_global_commands(&ctx.http, commands::slash_commands()).await {
+            Ok(set) => tracing::info!("Successfully synced {} global slash commands.", set.len()),
+            Err(e) => tracing::error!("Failed to register slash commands: {e}"),
+        }
         tokio::spawn(async move {
             let activities = [
-                ActivityData::listening("\\help | Minimal Music"),
-                ActivityData::playing("High Fidelity Audio"),
-                ActivityData::listening("\\play <song title>"),
+                ActivityData::listening("☕ ayo chill"),
+                ActivityData::watching("📖 /help to know command"),
+                ActivityData::listening("🎵 /play <song title>"),
+                ActivityData::playing("✨ waku waku"),
+                ActivityData::playing("📻 24/7 For everyone"),
             ];
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             for activity in activities.iter().cycle() {
                 tick.tick().await;
-                ctx.set_activity(Some(activity.clone()));
+                ctx.set_presence(Some(activity.clone()), OnlineStatus::Online);
             }
         });
     }

@@ -14,7 +14,7 @@ use songbird::Songbird;
 use tokio::task::JoinHandle;
 
 use crate::embed;
-use crate::queue::{MAX_UPCOMING, Queue, RepeatMode};
+use crate::queue::{MAX_UPCOMING, Queue};
 use crate::resolver::{Resolver, Track};
 use crate::stats::{Play, Stats};
 
@@ -97,7 +97,6 @@ impl Drop for Resolving<'_> {
 pub struct PlayOutcome {
     pub queued: bool,
     pub track: Track,
-    pub repeat: RepeatMode,
 }
 
 impl Bot {
@@ -164,19 +163,19 @@ impl Bot {
 
         drop(resolving);
 
-        let (start_now, repeat) = {
+        let start_now = {
             let mut players = self.players();
             let player = players.entry(guild).or_default();
             if player.queue.is_full() {
                 return Err(queue_full());
             }
             player.text_channel = Some(text_channel);
-            (player.queue.enqueue(track.clone()), player.queue.repeat)
+            player.queue.enqueue(track.clone())
         };
         if start_now {
             self.play_current(guild, Start::First).await;
         }
-        Ok(PlayOutcome { queued: !start_now, track, repeat })
+        Ok(PlayOutcome { queued: !start_now, track })
     }
 
     async fn join(self: &Arc<Self>, guild: GuildId, channel: ChannelId) -> Result<(), String> {

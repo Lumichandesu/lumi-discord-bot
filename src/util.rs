@@ -8,8 +8,9 @@ pub fn format_duration(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// `1h  2m  5s`, with two spaces between units as the old bot showed it.
 pub fn format_uptime(seconds: u64) -> String {
-    format!("{}h {}m {}s", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+    format!("{}h  {}m  {}s", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
 /// Parses a seek target: `90`, `90s`, `1:30` or `1:02:03`. Returns `None` for anything else.
@@ -60,7 +61,7 @@ mod tests {
 
     #[test]
     fn uptime_formatting() {
-        assert_eq!(format_uptime(3725), "1h 2m 5s");
+        assert_eq!(format_uptime(3725), "1h  2m  5s");
     }
 
     #[test]
