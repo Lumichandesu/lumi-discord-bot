@@ -18,6 +18,9 @@ use crate::resolver::{Resolver, Track};
 
 /// Leave after this long with nothing playing and nothing queued.
 const IDLE_LEAVE: Duration = Duration::from_secs(180);
+/// Stream URLs older than this are resolved again before playing. Googlevideo URLs last about
+/// 6 h, SoundCloud HLS URLs much less.
+const STREAM_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Default)]
 pub struct GuildPlayer {
@@ -32,6 +35,8 @@ pub struct GuildPlayer {
     seeking: bool,
     /// Set by skip() so the end event moves past the track even in track-repeat mode.
     skip_requested: bool,
+    /// The current track already failed once and was retried with a fresh stream URL.
+    retried: bool,
 }
 
 impl GuildPlayer {
@@ -106,7 +111,7 @@ impl Bot {
             (player.queue.enqueue(track.clone()), player.queue.repeat)
         };
         if start_now {
-            self.play_current(guild).await;
+            self.play_current(guild, false).await;
         }
         Ok(PlayOutcome { queued: !start_now, track, repeat })
     }
@@ -134,7 +139,8 @@ impl Bot {
     }
 
     /// Starts the queue's current track, or arms the idle timer when there is none.
-    async fn play_current(self: &Arc<Self>, guild: GuildId) {
+    /// `refresh` forces a new stream URL even when the stored one is still young.
+    async fn play_current(self: &Arc<Self>, guild: GuildId, refresh: bool) {
         let next = self.with_player(guild, |p| {
             p.cancel_idle();
             p.paused = false;
@@ -145,6 +151,29 @@ impl Bot {
             None => return,
             Some(None) => return self.arm_idle(guild),
             Some(Some(next)) => next,
+        };
+        let track = if refresh || track.resolved_at.elapsed() > STREAM_MAX_AGE {
+            match self.resolver.refresh(&track).await {
+                Ok(fresh) => {
+                    let current = self.with_player(guild, |p| {
+                        let current = p.generation == generation;
+                        if current {
+                            p.queue.current = Some(fresh.clone());
+                        }
+                        current
+                    });
+                    if current != Some(true) {
+                        return;
+                    }
+                    fresh
+                }
+                Err(e) => {
+                    tracing::warn!("could not refresh the stream URL for {}: {e}", track.url);
+                    track
+                }
+            }
+        } else {
+            track
         };
         let Some(call) = self.songbird.get(guild) else {
             self.stop(guild).await;
@@ -179,25 +208,30 @@ impl Bot {
     async fn on_track_end(self: &Arc<Self>, guild: GuildId, generation: u64, failed: bool) {
         let proceed = self.with_player(guild, |p| {
             if p.generation != generation {
-                return false;
+                return None;
             }
             if failed && p.seeking {
                 // seek() sees the same failure and restarts the track at the target.
-                return false;
+                return None;
             }
             p.generation += 1;
             p.handle = None;
-            if failed {
-                p.queue.skip_failed();
-            } else if std::mem::take(&mut p.skip_requested) {
-                p.queue.skip();
-            } else {
-                p.queue.advance();
+            // The first failure is often an expired stream URL: retry once with a fresh one.
+            let retry = failed && !p.retried;
+            p.retried = retry;
+            if !retry {
+                if failed {
+                    p.queue.skip_failed();
+                } else if std::mem::take(&mut p.skip_requested) {
+                    p.queue.skip();
+                } else {
+                    p.queue.advance();
+                }
             }
-            true
+            Some(retry)
         });
-        if proceed == Some(true) {
-            self.play_current(guild).await;
+        if let Some(Some(retry)) = proceed {
+            self.play_current(guild, retry).await;
         }
     }
 
@@ -302,7 +336,7 @@ impl Bot {
             return false;
         }
         // A fresh stream only seeks forward from the start, which songbird supports.
-        self.play_current(guild).await;
+        self.play_current(guild, false).await;
         let Some(Some(handle)) = self.with_player(guild, |p| p.handle.clone()) else { return false };
         match handle.seek_async(Duration::from_secs(seconds)).await {
             Ok(_) => true,

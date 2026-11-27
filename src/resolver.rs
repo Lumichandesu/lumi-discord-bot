@@ -83,6 +83,8 @@ pub struct Track {
     pub protocol: Option<String>,
     pub http_headers: Vec<(String, String)>,
     pub filesize: Option<u64>,
+    /// When yt-dlp produced `stream_url`. Signed stream URLs expire, so old ones are refreshed.
+    pub resolved_at: Instant,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +122,7 @@ pub fn parse_ytdlp_json(raw: &str, fallback_url: &str) -> Result<Track, String> 
         protocol: entry.protocol,
         http_headers: entry.http_headers.map(|h| h.into_iter().collect()).unwrap_or_default(),
         filesize: entry.filesize,
+        resolved_at: Instant::now(),
     })
 }
 
@@ -324,6 +327,13 @@ impl Resolver {
         let track = parse_ytdlp_json(&raw, &target)?;
         self.store(key, &track);
         Ok(track)
+    }
+
+    /// Runs yt-dlp again on the track's page to get a fresh stream URL (the cache is skipped).
+    pub async fn refresh(&self, track: &Track) -> Result<Track, String> {
+        let _turn = self.gate.lock().await;
+        let raw = self.run_ytdlp(&track.url).await?;
+        parse_ytdlp_json(&raw, &track.url)
     }
 
     async fn bridge_query(&self, url: &str, provider: Provider) -> Option<String> {
