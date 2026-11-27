@@ -117,13 +117,13 @@ impl Handler {
         }
         let Some(name) = commands::canonical(typed) else { return };
 
-        if matches!(name, "play" | "lyrics") {
-            // Start the work at once; the typing indicator is only a hint.
+        // Start the work at once; the typing indicator is only a hint.
+        let typing = matches!(name, "play" | "lyrics").then(|| {
             let (http, channel) = (ctx.http.clone(), msg.channel_id);
             tokio::spawn(async move {
                 let _ = channel.broadcast_typing(&http).await;
-            });
-        }
+            })
+        });
         // Like the old bot, ping first sends a placeholder and measures that round trip.
         let started = Instant::now();
         let mut placeholder = None;
@@ -158,6 +158,10 @@ impl Handler {
             return;
         }
 
+        // A typing request that reached Discord after the reply would show "typing" for 10 s.
+        if let Some(typing) = typing {
+            let _ = tokio::time::timeout(Duration::from_millis(300), typing).await;
+        }
         // Replies echo user text and track titles: never let them ping @everyone, roles or users.
         let mut out = CreateMessage::new()
             .reference_message(msg)
