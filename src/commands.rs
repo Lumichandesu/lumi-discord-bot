@@ -140,16 +140,16 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             }
         }
         "pause" => {
-            bot.set_paused(inv.guild_in_voice()?, true);
+            bot.set_paused(inv.guild_in_voice()?, true)?;
             Reply::text("⏸️ Playback paused.")
         }
         "resume" => {
-            bot.set_paused(inv.guild_in_voice()?, false);
+            bot.set_paused(inv.guild_in_voice()?, false)?;
             Reply::text("▶️ Playback resumed.")
         }
         "skip" => {
-            let skipped = bot.skip(inv.guild_in_voice()?).flatten();
-            Reply::text(format!("⏭️ Skipped: **{}**", skipped.map_or("Current track".into(), |t| t.title)))
+            let skipped = bot.skip(inv.guild_in_voice()?).ok_or("Nothing is playing.")?;
+            Reply::text(format!("⏭️ Skipped: **{}**", skipped.title))
         }
         "stop" => {
             bot.stop(inv.guild_in_voice()?).await;

@@ -30,6 +30,8 @@ pub struct GuildPlayer {
     /// Set while a seek is in flight. A failed seek errors the track in songbird; that error
     /// must restart the track instead of dropping it from the queue.
     seeking: bool,
+    /// Set by skip() so the end event moves past the track even in track-repeat mode.
+    skip_requested: bool,
 }
 
 impl GuildPlayer {
@@ -187,6 +189,8 @@ impl Bot {
             p.handle = None;
             if failed {
                 p.queue.skip_failed();
+            } else if std::mem::take(&mut p.skip_requested) {
+                p.queue.skip();
             } else {
                 p.queue.advance();
             }
@@ -239,32 +243,35 @@ impl Bot {
         had_player
     }
 
-    /// Stops the current track; the end event then starts the next one.
-    pub fn skip(&self, guild: GuildId) -> Option<Option<Track>> {
+    /// Stops the current track; the end event then starts the next one. Returns the skipped track,
+    /// or `None` when nothing was playing.
+    pub fn skip(&self, guild: GuildId) -> Option<Track> {
         self.with_player(guild, |p| {
-            if let Some(h) = &p.handle {
-                let _ = h.stop();
-            }
-            p.queue.current.clone()
+            let stopped = p.handle.as_ref().is_some_and(|h| h.stop().is_ok());
+            p.skip_requested = stopped;
+            if stopped { p.queue.current.clone() } else { None }
         })
+        .flatten()
     }
 
-    pub fn set_paused(&self, guild: GuildId, paused: bool) -> bool {
+    /// Pauses or resumes the current track. The error says why nothing changed.
+    pub fn set_paused(&self, guild: GuildId, paused: bool) -> Result<(), &'static str> {
         self.with_player(guild, |p| {
             if p.paused == paused {
-                return false;
+                return Err(if paused { "Playback is already paused." } else { "Playback is not paused." });
             }
             let ok = match &p.handle {
                 Some(h) if paused => h.pause().is_ok(),
                 Some(h) => h.play().is_ok(),
                 None => false,
             };
-            if ok {
-                p.paused = paused;
+            if !ok {
+                return Err("Nothing is playing.");
             }
-            ok
+            p.paused = paused;
+            Ok(())
         })
-        .unwrap_or(false)
+        .unwrap_or(Err("Nothing is playing."))
     }
 
     pub async fn seek(self: &Arc<Self>, guild: GuildId, seconds: u64) -> bool {

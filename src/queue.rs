@@ -82,6 +82,16 @@ impl<T> Queue<T> {
         self.current.as_ref()
     }
 
+    /// Moves on after the user skipped the current track. Track repeat is ignored so a skip always
+    /// leaves the song; queue repeat still keeps the skipped track at the end of the loop.
+    pub fn skip(&mut self) -> Option<&T> {
+        if self.repeat == RepeatMode::Queue {
+            self.advance()
+        } else {
+            self.skip_failed()
+        }
+    }
+
     /// Removes every upcoming track and returns how many were removed.
     pub fn clear(&mut self) -> usize {
         let n = self.upcoming.len();
@@ -181,6 +191,17 @@ mod tests {
         let mut q = queue(Some(1), &[2], RepeatMode::Queue);
         assert_eq!(q.skip_failed(), Some(&2));
         assert!(q.upcoming.is_empty());
+    }
+
+    #[test]
+    fn skip_leaves_a_repeated_track() {
+        let mut q = queue(Some(1), &[2, 3], RepeatMode::Track);
+        assert_eq!(q.skip(), Some(&2));
+        let mut q = queue(Some(1), &[2, 3], RepeatMode::Queue);
+        assert_eq!(q.skip(), Some(&2));
+        assert_eq!(q.upcoming, VecDeque::from([3, 1]));
+        let mut q = queue(Some(1), &[], RepeatMode::Off);
+        assert_eq!(q.skip(), None);
     }
 
     #[test]

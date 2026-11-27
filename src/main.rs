@@ -165,13 +165,13 @@ impl Handler {
         let response = match i.data.custom_id.as_str() {
             "btn_pause" => {
                 let paused = bot.with_player(guild, |p| p.paused).unwrap_or(false);
-                bot.set_paused(guild, !paused);
+                let _ = bot.set_paused(guild, !paused);
                 refreshed().unwrap_or(CreateInteractionResponse::Acknowledge)
             }
-            "btn_skip" => {
-                bot.skip(guild);
-                ephemeral("⏭️ Skipped current track.".into())
-            }
+            "btn_skip" => match bot.skip(guild) {
+                Some(t) => ephemeral(format!("⏭️ Skipped: **{}**", t.title)),
+                None => ephemeral("❌ Nothing is playing.".into()),
+            },
             "btn_loop" => {
                 let mode = bot.with_player(guild, |p| p.queue.cycle_repeat()).unwrap_or_default();
                 refreshed().unwrap_or_else(|| ephemeral(format!("🔁 Loop mode: `{}`", mode.as_str().to_uppercase())))
