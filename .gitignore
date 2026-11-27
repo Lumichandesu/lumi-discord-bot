@@ -9,3 +9,4 @@ bun.lockb
 dist/
 *.log
 .DS_Store
+data/spotify-token.json

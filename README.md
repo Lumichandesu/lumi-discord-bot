@@ -1,55 +1,63 @@
-# 🎵 Lumi Discord Bot (v1.1)
+# Lumi Discord Bot: a music bot for Discord built with Bun and discord.js
 
-A minimal, ultra-lightweight, and high-fidelity Discord music bot built with **Bun**, **Discord.js**, and **@discordjs/voice**. Engineered to run 24/7 on low-spec cloud instances (such as Google Cloud `e2-micro` Always Free Tier) with memory consumption under 80 MB.
+Lumi is a self-hosted Discord music bot written in TypeScript for people who want to run their own bot for a server. It plays audio into voice channels from YouTube and SoundCloud links or search text, and it resolves Spotify, Apple Music and TIDAL links by looking up the track title and finding a match on YouTube. It runs on Bun with discord.js, `@discordjs/voice`, FFmpeg and yt-dlp.
 
----
+## Features
 
-## 🚀 What's New in Version 1.1
+- Commands use the `\` prefix. A smaller set also exists as slash commands.
+- Playback buttons on the now-playing message: pause, skip, loop, shuffle, stop, queue and lyrics.
+- Queue controls: skip, loop, shuffle, remove a track, clear, and seek to a time.
+- Lyrics are fetched from LRCLIB.
+- Audio is streamed through FFmpeg straight into `@discordjs/voice`, with no separate Lavalink server.
+- The bot leaves a voice channel about 30 seconds after the last person leaves, and stops after 3 minutes of idle playback.
 
-- **⚡ Lavalink-Free Native Engine:** Replaced external Java Lavalink nodes with native `@discordjs/voice` and FFmpeg raw PCM streaming, cutting RAM usage from ~500MB+ down to <80MB.
-- **🎛️ Interactive Button UI:** Control tracks directly in Discord with interactive buttons (Play/Pause, Skip, Loop, Shuffle, Stop, Queue, Lyrics).
-- **🌐 Universal Platform Resolver:** Seamless playback from YouTube, Spotify, Apple Music, and TIDAL via automated metadata bridging.
-- **📝 Lyrics & Seek Commands:** Integrated `\lyrics` powered by LRCLIB and precise timestamp hopping via `\seek <mm:ss>`.
-- **🚪 Smart Auto-Disconnect:** Automatically leaves empty voice channels after 30 seconds or idle queues after 3 minutes.
-- **📊 Real-time System Telemetry:** Upgraded `\ping` command showing WebSocket latency, roundtrip response time, heap RAM, and uptime.
-- **⌨️ Command Shortcuts:** Quick aliases added for essential actions (`\p`, `\np`, `\q`, `\s`, `\h`, `\l`).
+## Commands
 
----
+| Command | Alias | What it does |
+| :--- | :--- | :--- |
+| `\play <query or URL>` | `\p` | Play or queue a track |
+| `\pause`, `\resume` | | Pause or resume |
+| `\skip` | `\s` | Skip the current track |
+| `\stop` | | Stop, clear the queue and disconnect |
+| `\seek <time>` | | Jump to a time such as `1:45` |
+| `\nowplaying` | `\np` | Show the current track |
+| `\queue` | `\q` | Show the queue |
+| `\loop` | | Cycle the repeat mode |
+| `\shuffle` | | Shuffle the queue |
+| `\remove <position>` | | Remove a queued track |
+| `\clear` | | Clear upcoming tracks |
+| `\lyrics [query]` | `\l` | Show lyrics |
+| `\ping` | | Show latency, memory use and uptime |
+| `\help` | `\h` | List commands |
 
-## 📖 Command Reference
+Slash commands registered by `src/deploy-commands.ts`: `play`, `skip`, `stop`, `nowplaying`, `queue`, `pause`, `resume`, `shuffle`, `clear`.
 
-Prefix: `\` (Also supports native `/` Slash Commands)
+## Setup
 
-| Command | Alias | Description | Example |
-| :--- | :--- | :--- | :--- |
-| `\play <query>` | `\p` | Play from YouTube, Spotify, Apple Music, TIDAL, SoundCloud | `\play feel it d4vd` |
-| `\pause` | — | Pause current audio playback | `\pause` |
-| `\resume` | — | Resume paused playback | `\resume` |
-| `\skip` | `\s` | Skip to the next track in queue | `\skip` |
-| `\stop` | — | Stop music, clear queue, and disconnect | `\stop` |
-| `\seek <time>` | — | Jump to specific timestamp | `\seek 1:45` |
-| `\nowplaying` | `\np` | Display detailed metadata of current track | `\nowplaying` |
-| `\queue` | `\q` | View upcoming tracks in queue | `\queue` |
-| `\loop` | — | Cycle repeat mode (`OFF` ➔ `TRACK` ➔ `QUEUE`) | `\loop` |
-| `\shuffle` | — | Randomize queued tracks | `\shuffle` |
-| `\remove <#>` | — | Remove a track from queue by position | `\remove 3` |
-| `\clear` | — | Clear all upcoming tracks in queue | `\clear` |
-| `\lyrics [query]` | `\l` | Search and display track lyrics | `\lyrics` |
-| `\ping` | — | Display network ping and memory usage | `\ping` |
-| `\help` | `\h` | Display help guide | `\help` |
+Requirements: [Bun](https://bun.sh), [FFmpeg](https://ffmpeg.org) and [yt-dlp](https://github.com/yt-dlp/yt-dlp) available on the machine, and a bot application created in the Discord Developer Portal. The bot needs the Message Content intent enabled there, because it reads prefix commands.
 
----
+```bash
+git clone https://github.com/Lumichandesu/lumi-discord-bot.git
+cd lumi-discord-bot
+bun install
+cp .env.example .env
+```
 
-## 🛠️ Setup & Installation
+Fill in `.env`. `DISCORD_TOKEN` and `DISCORD_CLIENT_ID` are required; `DISCORD_GUILD_ID` is optional. Never commit `.env`.
 
-### Prerequisites
-- [Bun](https://bun.sh) (v1.1+)
-- [FFmpeg](https://ffmpeg.org)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+```bash
+bun run src/deploy-commands.ts   # register slash commands
+bun run start                    # start the bot
+```
 
-### Installation Steps
+Other scripts: `bun run dev` restarts on file changes, and `bun run typecheck` runs the TypeScript compiler.
 
-1. **Clone the Repository:**
-   ```bash
-   git clone [https://github.com/Lumichandesu/lumi-discord-bot.git](https://github.com/Lumichandesu/lumi-discord-bot.git)
-   cd lumi-discord-bot
+## Notes
+
+- Spotify, Apple Music and TIDAL links are only used to read the track name; the audio itself comes from YouTube through yt-dlp, so results can differ from the original track.
+- yt-dlp and the services it reads change often, so keep it updated if playback stops working.
+- There are no automated tests.
+
+## License
+
+MIT, see `LICENSE`.
