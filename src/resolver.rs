@@ -5,12 +5,13 @@
 //! YouTube search for that text.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use url::Url;
+use url::{Host, Url};
 
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_MAX: usize = 150;
@@ -74,6 +75,51 @@ pub fn classify(input: &str) -> Target {
         },
         _ => Target::Search(input.to_string()),
     }
+}
+
+/// Addresses the bot must never fetch for a user: loopback, private, link-local (cloud metadata),
+/// carrier-grade NAT, unique-local, multicast and unspecified.
+pub fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || (a == 100 && (b & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_internal_ip(v4.into()),
+            None => {
+                let first = v6.segments()[0];
+                v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            }
+        },
+    }
+}
+
+/// Rejects links to hosts on the bot's own network. YouTube and SoundCloud links skip the DNS lookup.
+async fn ensure_public(url: &str) -> Result<(), String> {
+    let blocked = || "Links to private or local network addresses are not allowed.".to_string();
+    let parsed = Url::parse(url).map_err(|_| "Invalid link.".to_string())?;
+    if detect_provider(&parsed).is_some() {
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let ips: Vec<IpAddr> = match parsed.host() {
+        Some(Host::Ipv4(ip)) => vec![ip.into()],
+        Some(Host::Ipv6(ip)) => vec![ip.into()],
+        Some(Host::Domain(d)) => tokio::net::lookup_host((d, port))
+            .await
+            .map_err(|_| "Could not resolve the link's host.".to_string())?
+            .map(|a| a.ip())
+            .collect(),
+        None => return Err("Invalid link.".into()),
+    };
+    if ips.is_empty() || ips.into_iter().any(is_internal_ip) { Err(blocked()) } else { Ok(()) }
 }
 
 /// Everything needed to display a track and open its audio stream.
@@ -319,9 +365,14 @@ impl Resolver {
             return Ok(t);
         }
 
+        let mut direct = false;
         let target = match classify(input) {
             Target::Search(q) => format!("ytsearch1:{q}"),
-            Target::Direct(url) => url,
+            Target::Direct(url) => {
+                ensure_public(&url).await?;
+                direct = true;
+                url
+            }
             Target::Bridge(url, provider) => {
                 let query = self.bridge_query(&url, provider).await.unwrap_or_else(|| {
                     if provider == Provider::AppleMusic {
@@ -337,15 +388,22 @@ impl Resolver {
 
         let raw = self.run_ytdlp(&target).await?;
         let track = parse_ytdlp_json(&raw, &target)?;
+        if direct {
+            // A generic page can point yt-dlp at media on an internal host.
+            ensure_public(&track.stream_url).await?;
+        }
         self.store(key, &track);
         Ok(track)
     }
 
     /// Runs yt-dlp again on the track's page to get a fresh stream URL (the cache is skipped).
     pub async fn refresh(&self, track: &Track) -> Result<Track, String> {
+        ensure_public(&track.url).await?;
         let _turn = self.gate.lock().await;
         let raw = self.run_ytdlp(&track.url).await?;
-        parse_ytdlp_json(&raw, &track.url)
+        let fresh = parse_ytdlp_json(&raw, &track.url)?;
+        ensure_public(&fresh.stream_url).await?;
+        Ok(fresh)
     }
 
     async fn bridge_query(&self, url: &str, provider: Provider) -> Option<String> {
@@ -539,6 +597,16 @@ mod tests {
         // Not http(s): treated as search text.
         assert!(matches!(classify("ftp://example.com/song"), Target::Search(_)));
         assert!(matches!(classify("artist: song"), Target::Search(_)));
+    }
+
+    #[test]
+    fn internal_addresses_are_blocked() {
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"] {
+            assert!(is_internal_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "142.250.1.1", "2001:4860:4860::8888"] {
+            assert!(!is_internal_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]
