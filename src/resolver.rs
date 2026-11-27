@@ -43,10 +43,16 @@ pub fn detect_provider(url: &Url) -> Option<Provider> {
             Provider::SoundCloud
         }
         "open.spotify.com" | "spotify.link" => Provider::Spotify,
-        "music.apple.com" | "itunes.apple.com" | "apple.co" => Provider::AppleMusic,
-        "tidal.com" | "www.tidal.com" | "listen.tidal.com" => Provider::Tidal,
+        "apple.co" => Provider::AppleMusic,
+        // Bridge hosts also match subdomains (geo.music.apple.com, embed.tidal.com), as the old bot did.
+        h if ["music.apple.com", "itunes.apple.com"].iter().any(|d| is_domain_or_sub(h, d)) => Provider::AppleMusic,
+        h if is_domain_or_sub(h, "tidal.com") => Provider::Tidal,
         _ => return None,
     })
+}
+
+fn is_domain_or_sub(host: &str, domain: &str) -> bool {
+    host.strip_suffix(domain).is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -511,6 +517,10 @@ mod tests {
         assert_eq!(provider("https://music.apple.com/us/song/x/1"), Some(Provider::AppleMusic));
         assert_eq!(provider("https://listen.tidal.com/track/1"), Some(Provider::Tidal));
         assert_eq!(provider("https://TIDAL.com/browse/track/1"), Some(Provider::Tidal));
+        assert_eq!(provider("https://geo.music.apple.com/us/album/x/123?i=456"), Some(Provider::AppleMusic));
+        assert_eq!(provider("https://embed.music.apple.com/us/album/x/1"), Some(Provider::AppleMusic));
+        assert_eq!(provider("https://embed.tidal.com/tracks/1"), Some(Provider::Tidal));
+        assert_eq!(provider("https://nottidal.com/track/1"), None);
         assert_eq!(provider("https://example.com/a.mp3"), None);
         assert_eq!(provider("https://notyoutube.com/watch"), None);
     }
