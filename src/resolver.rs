@@ -37,6 +37,8 @@ const YTDLP_ARGS: [&str; 11] = [
     "--socket-timeout",
     "5",
 ];
+/// yt-dlp options that make it reach YouTube another way than the bot's own HTTP client would.
+const ROUTING_OPTS: [&str; 4] = ["--proxy", "--source-address", "--cookies", "--cookies-from-browser"];
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +362,8 @@ pub struct Resolver {
     ytdlp: String,
     /// `YTDLP_EXTRA_ARGS`, split on whitespace and passed before the target.
     extra_args: Vec<String>,
+    /// `extra_args` send yt-dlp through a proxy, another address or with cookies.
+    routed_args: bool,
     cache: Mutex<HashMap<String, (Instant, Track)>>,
     /// Spawned yt-dlp runs one at a time, like the old bot, to keep CPU spikes low on small machines.
     gate: tokio::sync::Mutex<()>,
@@ -379,6 +383,7 @@ impl Resolver {
             http,
             worker: Worker::new(&ytdlp, worker_args),
             ytdlp,
+            routed_args: extra_args.iter().any(|a| ROUTING_OPTS.iter().any(|o| a == o || a.starts_with(&format!("{o}=")))),
             extra_args,
             cache: Mutex::new(HashMap::new()),
             gate: tokio::sync::Mutex::new(()),
@@ -421,7 +426,9 @@ impl Resolver {
         let mut direct = false;
         let target = match classify(input) {
             Target::Search(q) => {
-                if let Some(track) = self.fast_search(&q).await {
+                if !self.routed()
+                    && let Some(track) = self.fast_search(&q).await
+                {
                     self.store(key, &track);
                     return Ok(track);
                 }
@@ -481,6 +488,13 @@ impl Resolver {
         fresh.platform = track.platform;
         fresh.requester = track.requester;
         Ok(fresh)
+    }
+
+    /// Whether yt-dlp reaches YouTube through a proxy, another address or with cookies, from
+    /// `YTDLP_EXTRA_ARGS` or its config files. The bot's own search request would not, so
+    /// searches then go through yt-dlp only.
+    fn routed(&self) -> bool {
+        self.routed_args || self.worker.is_routed()
     }
 
     /// Plain-text search: find the first video with YouTube's own search API (about 0.4 s), then

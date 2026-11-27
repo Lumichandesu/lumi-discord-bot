@@ -108,6 +108,11 @@ impl Bot {
         self.players.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether a track is loaded in any guild, playing or paused.
+    pub fn is_playing(&self) -> bool {
+        self.players().values().any(|p| p.handle.is_some())
+    }
+
     pub fn has_player(&self, guild: GuildId) -> bool {
         self.players().contains_key(&guild)
     }

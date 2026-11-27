@@ -600,6 +600,8 @@ async fn run(config: Config) -> Result<(), String> {
     let http = http_client();
     let stats = stats::Stats::open(std::path::Path::new(stats::DB_PATH), http.clone())?;
     let bot = Arc::new(Bot::new(songbird.clone(), http, Some(stats)));
+    let playing = Arc::downgrade(&bot);
+    bot.resolver.worker.keep_while(move || playing.upgrade().is_some_and(|b| b.is_playing()));
     bot.resolver.worker.prewarm();
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
