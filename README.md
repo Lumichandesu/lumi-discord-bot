@@ -46,6 +46,7 @@ The slash commands have the same names, for example `/play query:...` and `/seek
    | `DISCORD_GUILD_ID` | no | With `--deploy`, register commands in this server only (updates instantly) instead of globally |
    | `YTDLP_PATH` | no | Path to the yt-dlp program; otherwise `~/bin/yt-dlp`, then `yt-dlp` on `PATH` |
 | `YTDLP_EXTRA_ARGS` | no | Extra yt-dlp arguments, split on spaces. The old TypeScript bot used `--extractor-args youtube:player_client=android`; set that if `--selftest` fails on your server with a sign-in or bot-check error |
+| `YTDLP_WORKER` | no | Set to `0` to spawn yt-dlp for every lookup instead of keeping the warm yt-dlp worker (see Notes) |
 | `FFMPEG_PATH` | no | Path to the ffmpeg program used for live streams and HLS; otherwise `ffmpeg` on `PATH` |
    | `RUST_LOG` | no | Log filter, default `lumi_discord_bot=info,serenity=warn,songbird=warn` |
 
@@ -63,7 +64,7 @@ The slash commands have the same names, for example `/play query:...` and `/seek
    CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 cargo build --release -j 1
    ```
 
-`./target/release/lumi-discord-bot --selftest` checks the parts that do not need Discord: it searches YouTube through yt-dlp, opens the audio stream and checks that it can be decoded. It skips the test if yt-dlp is not installed.
+`./target/release/lumi-discord-bot --selftest` checks the parts that do not need Discord: it searches YouTube through yt-dlp, opens the audio stream and checks that it can be decoded. It also prints how long each lookup path takes (spawned yt-dlp, the worker cold and warm, the InnerTube search, a prefetch) and the worker's memory. It skips the test if yt-dlp is not installed.
 
 ## Development
 
@@ -78,7 +79,9 @@ Unit tests cover the queue, shuffle, loop modes, seek time parsing, link classif
 
 - Audio for Spotify, Apple Music and TIDAL links comes from YouTube, so the result can differ from the original track.
 - yt-dlp and the sites it reads change often. Update yt-dlp if playback stops working.
-- yt-dlp runs one request at a time and results are cached for an hour (up to 150 entries), to keep CPU use low on small servers. On Linux and macOS it runs with `nice -n 19`.
+- When yt-dlp is the Python release (the `yt-dlp` zipapp or a pip script) and `python3` is installed, the bot keeps one warm Python process that imports yt-dlp once and answers up to two lookups at a time, instead of paying about two seconds of Python startup per song. The worker script is built into the binary and written to `$XDG_CACHE_HOME/lumi-discord-bot` (or `~/.cache/lumi-discord-bot`), where the zipapp is also unpacked so later starts load cached bytecode. It uses about 100 MB while running, stops after 15 minutes without lookups or playback, and is restarted on the next lookup or after a crash. When it cannot run (a standalone yt-dlp binary, no Python, or repeated crashes) yt-dlp is spawned per lookup as before, one at a time. `YTDLP_PATH` and `YTDLP_EXTRA_ARGS` apply to both paths.
+- Plain search text is looked up with YouTube's search API first (about 0.4 s), then the first video is opened with yt-dlp; if that fails the bot falls back to a yt-dlp `ytsearch1:` search. The voice channel is joined while the track resolves, and when a track starts the next one's stream URL is refreshed in the background if it would be stale by then, so skips do not wait for yt-dlp.
+- Results are cached for an hour (up to 150 entries). On Linux and macOS yt-dlp and the worker run with `nice -n 19`.
 
 ## License
 

@@ -164,6 +164,17 @@ pub struct Track {
     pub requester: Option<serenity::all::UserId>,
 }
 
+impl Track {
+    /// Takes the stream of a fresh lookup of the same page, keeping what the queue shows.
+    pub fn set_stream(&mut self, fresh: &Track) {
+        self.stream_url.clone_from(&fresh.stream_url);
+        self.protocol.clone_from(&fresh.protocol);
+        self.http_headers.clone_from(&fresh.http_headers);
+        self.filesize = fresh.filesize;
+        self.resolved_at = fresh.resolved_at;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct YtDlpJson {
     title: Option<String>,
@@ -341,6 +352,9 @@ fn join_title(title: &str, artist: Option<&str>) -> String {
     }
 }
 
+/// A stream URL lookup that callers for the same page share.
+type Refresh = Arc<tokio::sync::OnceCell<Result<Track, String>>>;
+
 pub struct Resolver {
     http: reqwest::Client,
     ytdlp: String,
@@ -351,6 +365,8 @@ pub struct Resolver {
     gate: tokio::sync::Mutex<()>,
     /// The warm yt-dlp process, used instead of spawning yt-dlp when it is available.
     pub worker: Arc<Worker>,
+    /// Refreshes in flight by page URL, so a prefetch and a track start share one lookup.
+    refreshing: Mutex<HashMap<String, Refresh>>,
 }
 
 impl Resolver {
@@ -366,6 +382,7 @@ impl Resolver {
             extra_args,
             cache: Mutex::new(HashMap::new()),
             gate: tokio::sync::Mutex::new(()),
+            refreshing: Mutex::new(HashMap::new()),
         }
     }
 
@@ -442,10 +459,25 @@ impl Resolver {
     }
 
     /// Runs yt-dlp again on the track's page to get a fresh stream URL (the cache is skipped).
+    /// Callers refreshing the same page at the same time share one lookup.
     pub async fn refresh(&self, track: &Track) -> Result<Track, String> {
-        ensure_public(&track.url).await?;
-        let mut fresh = self.extract(&track.url).await?;
-        ensure_public(&fresh.stream_url).await?;
+        let cell = self.refreshing.lock().unwrap_or_else(|e| e.into_inner()).entry(track.url.clone()).or_default().clone();
+        let result = cell
+            .get_or_init(|| async {
+                ensure_public(&track.url).await?;
+                let fresh = self.extract(&track.url).await?;
+                ensure_public(&fresh.stream_url).await?;
+                Ok(fresh)
+            })
+            .await
+            .clone();
+        {
+            let mut refreshing = self.refreshing.lock().unwrap_or_else(|e| e.into_inner());
+            if refreshing.get(&track.url).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                refreshing.remove(&track.url);
+            }
+        }
+        let mut fresh = result?;
         fresh.platform = track.platform;
         fresh.requester = track.requester;
         Ok(fresh)

@@ -102,6 +102,15 @@ impl Worker {
         });
     }
 
+    /// Counts as activity, so a worker is kept while music plays even without new requests.
+    pub fn touch(&self) {
+        if let Ok(state) = self.state.try_lock()
+            && let Some(p) = &state.proc
+        {
+            *p.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        }
+    }
+
     /// Runs yt-dlp on `target`. The inner result is yt-dlp's answer (the JSON info, or the error
     /// line); `Err(Unavailable)` means the worker could not be used and nothing was decided.
     pub async fn extract(self: &Arc<Self>, target: &str, timeout: Duration) -> Result<Result<serde_json::Value, String>, Unavailable> {

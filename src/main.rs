@@ -118,7 +118,11 @@ impl Handler {
         let Some(name) = commands::canonical(typed) else { return };
 
         if matches!(name, "play" | "lyrics") {
-            let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+            // Start the work at once; the typing indicator is only a hint.
+            let (http, channel) = (ctx.http.clone(), msg.channel_id);
+            tokio::spawn(async move {
+                let _ = channel.broadcast_typing(&http).await;
+            });
         }
         // Like the old bot, ping first sends a placeholder and measures that round trip.
         let started = Instant::now();

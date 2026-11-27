@@ -15,7 +15,7 @@ use symphonia::core::io::ReadOnlySource;
 use tokio::task::JoinHandle;
 
 use crate::embed;
-use crate::queue::{MAX_UPCOMING, Queue};
+use crate::queue::{MAX_UPCOMING, Queue, RepeatMode};
 use crate::resolver::{Resolver, Track};
 use crate::stats::{Play, Stats};
 
@@ -24,6 +24,8 @@ const IDLE_LEAVE: Duration = Duration::from_secs(180);
 /// Stream URLs older than this are resolved again before playing. Googlevideo URLs last about
 /// 6 h, SoundCloud HLS URLs much less.
 const STREAM_MAX_AGE: Duration = Duration::from_secs(30 * 60);
+/// A prefetch also covers a track that will turn stale within this long after the current one.
+const PREFETCH_SLACK: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct GuildPlayer {
@@ -128,16 +130,31 @@ impl Bot {
         if self.with_player(guild, |p| p.queue.is_full()) == Some(true) {
             return Err(queue_full());
         }
-        let mut track = self.resolver.resolve(query).await?;
-        track.requester = Some(user);
-
-        if !self.has_player(guild) {
+        // Join the voice channel while the track resolves; both take a second or more.
+        let join = async {
+            if self.has_player(guild) {
+                return Ok(false);
+            }
             let lock = self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone();
             let _joining = lock.lock().await;
-            if !self.has_player(guild) {
-                self.join(guild, channel).await?;
+            if self.has_player(guild) {
+                return Ok(false);
             }
-        }
+            self.join(guild, channel).await.map(|()| true)
+        };
+        let (resolved, joined) = tokio::join!(self.resolver.resolve(query), join);
+        let mut track = match resolved {
+            Ok(track) => track,
+            Err(e) => {
+                // Leave again if this command joined and nothing else started meanwhile.
+                if joined == Ok(true) && self.with_player(guild, |p| p.queue.is_idle()) == Some(true) {
+                    self.stop(guild).await;
+                }
+                return Err(e);
+            }
+        };
+        joined?;
+        track.requester = Some(user);
 
         let start_now = {
             let mut players = self.players();
@@ -233,6 +250,8 @@ impl Bot {
             })
             .flatten();
         let Some((text_channel, repeat)) = announce else { return };
+        self.resolver.worker.touch();
+        self.prefetch_next(guild, track.duration);
         if !matches!(start, Start::First | Start::Next) {
             return;
         }
@@ -256,6 +275,42 @@ impl Bot {
                 }
             });
         }
+    }
+
+    /// Refreshes, in the background, the stream URLs of the tracks that can play after the current
+    /// one (the next in the queue, and the current one again in track repeat) when they would be
+    /// too old by then, so a skip or the next song does not wait for yt-dlp.
+    pub fn prefetch_next(self: &Arc<Self>, guild: GuildId, playing_for: u64) -> Option<JoinHandle<()>> {
+        let ahead = Duration::from_secs(playing_for) + PREFETCH_SLACK;
+        let stale: Vec<Track> = self.with_player(guild, |p| {
+            let q = &p.queue;
+            let next = q.upcoming.front().or(q.current.as_ref().filter(|_| q.repeat != RepeatMode::Off));
+            let again = q.current.as_ref().filter(|_| q.repeat == RepeatMode::Track);
+            let mut stale: Vec<Track> =
+                next.into_iter().chain(again).filter(|t| t.resolved_at.elapsed() + ahead > STREAM_MAX_AGE).cloned().collect();
+            stale.dedup_by(|a, b| a.url == b.url && a.resolved_at == b.resolved_at);
+            stale
+        })?;
+        if stale.is_empty() {
+            return None;
+        }
+        let bot = self.clone();
+        Some(tokio::spawn(async move {
+            for old in stale {
+                match bot.resolver.refresh(&old).await {
+                    Ok(fresh) => {
+                        bot.with_player(guild, |p| {
+                            for slot in p.queue.current.iter_mut().chain(p.queue.upcoming.iter_mut()) {
+                                if slot.url == old.url && slot.resolved_at == old.resolved_at {
+                                    slot.set_stream(&fresh);
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => tracing::debug!("could not prefetch the stream URL for {}: {e}", old.url),
+                }
+            }
+        }))
     }
 
     pub fn input_for(&self, track: &Track) -> Input {
