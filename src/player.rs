@@ -44,6 +44,9 @@ pub struct Bot {
     pub started: Instant,
     pub shard_manager: OnceLock<Arc<ShardManager>>,
     players: Mutex<HashMap<GuildId, GuildPlayer>>,
+    /// One lock per guild so two play commands cannot join the same channel at once
+    /// (songbird cancels an in-progress join when a second one starts).
+    join_locks: Mutex<HashMap<GuildId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 pub struct PlayOutcome {
@@ -61,6 +64,7 @@ impl Bot {
             started: Instant::now(),
             shard_manager: OnceLock::new(),
             players: Mutex::new(HashMap::new()),
+            join_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -84,20 +88,11 @@ impl Bot {
         let track = self.resolver.resolve(query).await?;
 
         if !self.has_player(guild) {
-            let call = self
-                .songbird
-                .join(guild, channel)
-                .await
-                .map_err(|e| format!("Could not join the voice channel: {e}"))?;
-            {
-                let mut call = call.lock().await;
-                if let Err(e) = call.deafen(true).await {
-                    tracing::warn!("could not self-deafen in {guild}: {e}");
-                }
-                call.remove_all_global_events();
-                call.add_global_event(Event::Core(CoreEvent::DriverDisconnect), Disconnected { bot: self.clone(), guild });
+            let lock = self.join_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(guild).or_default().clone();
+            let _joining = lock.lock().await;
+            if !self.has_player(guild) {
+                self.join(guild, channel).await?;
             }
-            self.players().entry(guild).or_default();
         }
 
         let (start_now, repeat) = {
@@ -109,6 +104,28 @@ impl Bot {
             self.play_current(guild).await;
         }
         Ok(PlayOutcome { queued: !start_now, track, repeat })
+    }
+
+    async fn join(self: &Arc<Self>, guild: GuildId, channel: ChannelId) -> Result<(), String> {
+        let call = match self.songbird.join(guild, channel).await {
+            Ok(call) => call,
+            Err(e) => {
+                // songbird keeps the Call after a failed join; drop it so the bot does not
+                // stay in the channel without a player if the connection completes later.
+                let _ = self.songbird.remove(guild).await;
+                return Err(format!("Could not join the voice channel: {e}"));
+            }
+        };
+        {
+            let mut call = call.lock().await;
+            if let Err(e) = call.deafen(true).await {
+                tracing::warn!("could not self-deafen in {guild}: {e}");
+            }
+            call.remove_all_global_events();
+            call.add_global_event(Event::Core(CoreEvent::DriverDisconnect), Disconnected { bot: self.clone(), guild });
+        }
+        self.players().entry(guild).or_default();
+        Ok(())
     }
 
     /// Starts the queue's current track, or arms the idle timer when there is none.
@@ -177,7 +194,16 @@ impl Bot {
         let bot = self.clone();
         let task = tokio::spawn(async move {
             tokio::time::sleep(IDLE_LEAVE).await;
-            if bot.with_player(guild, |p| p.queue.is_idle()) == Some(true) {
+            // Take our own handle out first: stop() aborts `idle_task`, which would cancel this
+            // task before it finishes leaving the channel.
+            let idle = bot.with_player(guild, |p| {
+                let idle = p.queue.is_idle();
+                if idle {
+                    p.idle_task.take();
+                }
+                idle
+            });
+            if idle == Some(true) {
                 tracing::info!("leaving {guild} after idle timeout");
                 bot.stop(guild).await;
             }
@@ -187,18 +213,23 @@ impl Bot {
         }
     }
 
-    /// Clears the queue, stops playback and leaves the voice channel.
+    /// Clears the queue, stops playback and leaves the voice channel. Returns whether a player
+    /// existed; the voice channel is left either way.
     pub async fn stop(&self, guild: GuildId) -> bool {
         let removed = self.players().remove(&guild);
-        let Some(mut player) = removed else { return false };
-        player.cancel_idle();
-        if let Some(h) = player.handle.take() {
-            let _ = h.stop();
+        let had_player = removed.is_some();
+        if let Some(mut player) = removed {
+            player.cancel_idle();
+            if let Some(h) = player.handle.take() {
+                let _ = h.stop();
+            }
         }
-        if let Err(e) = self.songbird.remove(guild).await {
+        if self.songbird.get(guild).is_some()
+            && let Err(e) = self.songbird.remove(guild).await
+        {
             tracing::debug!("leave {guild}: {e}");
         }
-        true
+        had_player
     }
 
     /// Stops the current track; the end event then starts the next one.
