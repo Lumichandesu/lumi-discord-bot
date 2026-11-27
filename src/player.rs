@@ -1,6 +1,6 @@
 //! Per-guild playback state on top of songbird.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -77,21 +77,6 @@ pub struct Bot {
     /// One lock per guild so two play commands cannot join the same channel at once
     /// (songbird cancels an in-progress join when a second one starts).
     join_locks: Mutex<HashMap<GuildId, Arc<tokio::sync::Mutex<()>>>>,
-    /// Users with a play request still resolving; one at a time each, so nobody can fill the
-    /// shared yt-dlp queue.
-    resolving: Mutex<HashSet<UserId>>,
-}
-
-/// Removes the user from `Bot::resolving` when the play request finishes.
-struct Resolving<'a> {
-    set: &'a Mutex<HashSet<UserId>>,
-    user: UserId,
-}
-
-impl Drop for Resolving<'_> {
-    fn drop(&mut self) {
-        self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.user);
-    }
 }
 
 pub struct PlayOutcome {
@@ -111,7 +96,6 @@ impl Bot {
             stats: stats.map(Arc::new),
             players: Mutex::new(HashMap::new()),
             join_locks: Mutex::new(HashMap::new()),
-            resolving: Mutex::new(HashSet::new()),
         }
     }
 
@@ -143,10 +127,6 @@ impl Bot {
         if self.with_player(guild, |p| p.queue.is_full()) == Some(true) {
             return Err(queue_full());
         }
-        if !self.resolving.lock().unwrap_or_else(|e| e.into_inner()).insert(user) {
-            return Err("Please wait until your previous request has finished.".into());
-        }
-        let resolving = Resolving { set: &self.resolving, user };
         let mut track = self.resolver.resolve(query).await?;
         track.requester = Some(user);
         if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
@@ -160,8 +140,6 @@ impl Bot {
                 self.join(guild, channel).await?;
             }
         }
-
-        drop(resolving);
 
         let start_now = {
             let mut players = self.players();
