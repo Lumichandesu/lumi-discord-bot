@@ -111,8 +111,6 @@ pub struct Invocation {
     pub guild: Option<GuildId>,
     pub user: UserId,
     pub voice_channel: Option<ChannelId>,
-    /// The bot's own voice channel in this guild, if it is in one.
-    pub bot_channel: Option<ChannelId>,
     /// The text channel the command was used in.
     pub text_channel: ChannelId,
     pub guild_name: Option<String>,
@@ -128,15 +126,6 @@ impl Invocation {
     fn voice(&self) -> Result<ChannelId, String> {
         self.voice_channel.ok_or_else(|| "You must be in a voice channel to use this command.".into())
     }
-    /// Checks that the caller is in a voice channel, and in the bot's channel when the bot is in
-    /// one, so people elsewhere cannot control playback for the listeners.
-    fn check_voice(&self) -> Result<(), String> {
-        let caller = self.voice()?;
-        if self.bot_channel.is_some_and(|b| b != caller) {
-            return Err("You must be in the same voice channel as the bot.".into());
-        }
-        Ok(())
-    }
     fn guild_name(&self) -> &str {
         self.guild_name.as_deref().unwrap_or("Server")
     }
@@ -147,8 +136,6 @@ const GUILD_ONLY: &[&str] = &[
     "pause", "resume", "skip", "stop", "queue", "nowplaying", "clear", "loop", "remove", "shuffle", "seek", "stats",
     "mystats", "top",
 ];
-/// Commands that change playback, so the caller must be with the bot.
-const NEEDS_VOICE: &[&str] = &["pause", "resume", "skip", "stop", "clear", "loop", "remove", "shuffle", "seek"];
 
 pub async fn run(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> Reply {
     let Some(guild) = inv.guild else {
@@ -160,11 +147,6 @@ pub async fn run(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> Re
             Err(e) => Reply::private(format!("❌ {e}")),
         };
     };
-    if NEEDS_VOICE.contains(&name)
-        && let Err(e) = inv.check_voice()
-    {
-        return Reply::private(format!("❌ {e}"));
-    }
     match dispatch(bot, inv, Some(guild), name, args).await {
         Ok(r) => r,
         Err(e) => Reply::private(format!("❌ {e}")),
@@ -314,7 +296,7 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, guild: Option<GuildId>, name
 
 async fn play(bot: &Arc<Bot>, inv: &Invocation, guild: Option<GuildId>, query: &str) -> Result<Reply, String> {
     let guild = guild.ok_or("This command can only be used in a Discord server.")?;
-    inv.check_voice()?;
+    // Like the old bot, only play needs a voice channel, and any channel will do.
     let channel = inv.voice()?;
     let out = bot.play(guild, channel, inv.text_channel, inv.user, query).await?;
     if out.queued {

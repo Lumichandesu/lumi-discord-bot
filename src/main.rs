@@ -121,7 +121,6 @@ impl Handler {
             username: msg.author.name.clone(),
             target_user: None,
             slash: false,
-            bot_channel: Self::bot_channel(ctx, msg.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
@@ -191,7 +190,6 @@ impl Handler {
             username: cmd.user.name.clone(),
             target_user,
             slash: true,
-            bot_channel: Self::bot_channel(ctx, cmd.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
