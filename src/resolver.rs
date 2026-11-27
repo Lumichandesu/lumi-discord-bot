@@ -319,6 +319,8 @@ fn join_title(title: &str, artist: Option<&str>) -> String {
 pub struct Resolver {
     http: reqwest::Client,
     ytdlp: String,
+    /// `YTDLP_EXTRA_ARGS`, split on whitespace and passed before the target.
+    extra_args: Vec<String>,
     cache: Mutex<HashMap<String, (Instant, Track)>>,
     /// yt-dlp runs one at a time, like the old bot, to keep CPU spikes low on small machines.
     gate: tokio::sync::Mutex<()>,
@@ -326,7 +328,8 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http, ytdlp: find_ytdlp(), cache: Mutex::new(HashMap::new()), gate: tokio::sync::Mutex::new(()) }
+        let extra_args = std::env::var("YTDLP_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
+        Self { http, ytdlp: find_ytdlp(), extra_args, cache: Mutex::new(HashMap::new()), gate: tokio::sync::Mutex::new(()) }
     }
 
     pub fn ytdlp_program(&self) -> &str {
@@ -531,7 +534,7 @@ impl Resolver {
         } else {
             tokio::process::Command::new(&self.ytdlp)
         };
-        cmd.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        cmd.args(&self.extra_args).args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
 
         let output = tokio::time::timeout(YTDLP_TIMEOUT, cmd.output())
             .await

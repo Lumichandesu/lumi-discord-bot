@@ -45,6 +45,7 @@ The slash commands have the same names, for example `/play query:...` and `/seek
    | `DISCORD_CLIENT_ID` | for `--deploy` | Application ID |
    | `DISCORD_GUILD_ID` | no | With `--deploy`, register commands in this server only (updates instantly) instead of globally |
    | `YTDLP_PATH` | no | Path to the yt-dlp program; otherwise `~/bin/yt-dlp`, then `yt-dlp` on `PATH` |
+| `YTDLP_EXTRA_ARGS` | no | Extra yt-dlp arguments, split on spaces. The old TypeScript bot used `--extractor-args youtube:player_client=android`; set that if `--selftest` fails on your server with a sign-in or bot-check error |
 | `FFMPEG_PATH` | no | Path to the ffmpeg program used for live streams and HLS; otherwise `ffmpeg` on `PATH` |
    | `RUST_LOG` | no | Log filter, default `lumi_discord_bot=info,serenity=warn,songbird=warn` |
 
