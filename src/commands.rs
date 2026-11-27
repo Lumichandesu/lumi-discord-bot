@@ -79,6 +79,8 @@ pub struct Reply {
     pub content: Option<String>,
     pub embed: Option<CreateEmbed>,
     pub components: Vec<CreateActionRow>,
+    /// Set for error replies, which slash commands show only to the caller.
+    pub error: bool,
 }
 
 impl Reply {
@@ -89,7 +91,7 @@ impl Reply {
         Self { embed: Some(e), ..Default::default() }
     }
     pub fn error(s: impl std::fmt::Display) -> Self {
-        Self::text(format!("❌ {s}"))
+        Self { error: true, ..Self::text(format!("❌ {s}")) }
     }
 }
 
@@ -98,6 +100,8 @@ pub struct Invocation {
     pub guild: Option<GuildId>,
     pub user: UserId,
     pub voice_channel: Option<ChannelId>,
+    /// The bot's own voice channel in this guild, if it is in one.
+    pub bot_channel: Option<ChannelId>,
     pub rest_ms: u128,
     pub ws_ms: Option<u128>,
 }
@@ -109,10 +113,14 @@ impl Invocation {
     fn voice(&self) -> Result<ChannelId, String> {
         self.voice_channel.ok_or_else(|| "You must be in a voice channel to use this command.".into())
     }
-    /// Guild plus a check that the caller is in a voice channel.
+    /// Guild plus a check that the caller is in a voice channel, and in the bot's channel when the
+    /// bot is in one, so people elsewhere cannot control playback for the listeners.
     fn guild_in_voice(&self) -> Result<GuildId, String> {
         let g = self.guild()?;
-        self.voice()?;
+        let caller = self.voice()?;
+        if self.bot_channel.is_some_and(|b| b != caller) {
+            return Err("You must be in the same voice channel as the bot.".into());
+        }
         Ok(g)
     }
 }
@@ -130,14 +138,14 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             if args.is_empty() {
                 return Ok(Reply::text("🎵 Usage: `\\play <Song Title / URL (YouTube, Spotify, Apple Music, TIDAL, SoundCloud)>`"));
             }
-            let guild = inv.guild()?;
+            let guild = inv.guild_in_voice()?;
             let channel = inv.voice()?;
             let out = bot.play(guild, channel, inv.user, args).await?;
             if out.queued {
                 Reply::text(format!("🎵 Added to queue: **{}**", out.track.title))
             } else {
                 let (e, rows) = embed::now_playing(&out.track, false, out.repeat);
-                Reply { content: None, embed: Some(e), components: rows }
+                Reply { content: None, embed: Some(e), components: rows, error: false }
             }
         }
         "pause" => {

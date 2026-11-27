@@ -74,6 +74,11 @@ impl Handler {
         ctx.cache.guild(guild?)?.voice_states.get(&user)?.channel_id
     }
 
+    fn bot_channel(ctx: &Context, guild: Option<GuildId>) -> Option<serenity::all::ChannelId> {
+        let me = ctx.cache.current_user().id;
+        Self::voice_channel(ctx, guild, me)
+    }
+
     async fn on_prefix(&self, ctx: &Context, msg: &Message) {
         let Some((typed, args)) = commands::parse_prefix(&msg.content) else { return };
         let Some(name) = commands::canonical(typed) else { return };
@@ -86,6 +91,7 @@ impl Handler {
             guild: msg.guild_id,
             user: msg.author.id,
             voice_channel: Self::voice_channel(ctx, msg.guild_id, msg.author.id),
+            bot_channel: Self::bot_channel(ctx, msg.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
@@ -129,10 +135,23 @@ impl Handler {
             guild: cmd.guild_id,
             user: cmd.user.id,
             voice_channel: Self::voice_channel(ctx, cmd.guild_id, cmd.user.id),
+            bot_channel: Self::bot_channel(ctx, cmd.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
         };
         let reply = commands::run(&self.bot, &inv, name, args.trim()).await;
+        if reply.error {
+            // The deferred reply is public; replace it with an error only the caller sees.
+            let _ = cmd.delete_response(&ctx.http).await;
+            let followup = CreateInteractionResponseFollowup::new()
+                .content(truncate_chars(reply.content.as_deref().unwrap_or("❌ Error."), MESSAGE_MAX))
+                .allowed_mentions(CreateAllowedMentions::new())
+                .ephemeral(true);
+            if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                tracing::warn!("could not answer /{name}: {e}");
+            }
+            return;
+        }
 
         let mut edit =
             EditInteractionResponse::new().allowed_mentions(CreateAllowedMentions::new()).components(reply.components);
@@ -174,7 +193,17 @@ impl Handler {
             .flatten()
         };
 
-        let response = match i.data.custom_id.as_str() {
+        let id = i.data.custom_id.as_str();
+        if matches!(id, "btn_pause" | "btn_skip" | "btn_loop" | "btn_shuffle" | "btn_stop") {
+            let caller = Self::voice_channel(ctx, Some(guild), i.user.id);
+            let bot_channel = Self::bot_channel(ctx, Some(guild));
+            if caller.is_none() || bot_channel.is_some_and(|b| Some(b) != caller) {
+                let text = "❌ You must be in the bot's voice channel to use these controls.";
+                let _ = i.create_response(&ctx.http, ephemeral(text.into())).await;
+                return;
+            }
+        }
+        let response = match id {
             "btn_pause" => {
                 let paused = bot.with_player(guild, |p| p.paused).unwrap_or(false);
                 let _ = bot.set_paused(guild, !paused);
