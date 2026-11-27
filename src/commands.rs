@@ -233,10 +233,12 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             let Some(Some(duration)) = bot.with_player(guild, |p| p.queue.current.as_ref().map(|t| t.duration)) else {
                 return Ok(Reply::error("No track currently playing."));
             };
-            if args.is_empty() {
+            // Only the first word is read, as in the old bot (`\\seek 1:30 please`).
+            let time = args.split_whitespace().next().unwrap_or("");
+            if time.is_empty() {
                 return Ok(Reply::text("⏩ Usage: `\\seek <mm:ss | seconds>` (e.g. `\\seek 1:45`)"));
             }
-            let Some(seconds) = parse_time(args) else {
+            let Some(seconds) = parse_time(time) else {
                 return Ok(Reply::error("Invalid time format. Use `mm:ss` or seconds."));
             };
             if duration > 0 && seconds >= duration {

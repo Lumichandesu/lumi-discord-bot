@@ -12,9 +12,11 @@ pub fn format_uptime(seconds: u64) -> String {
     format!("{}h {}m {}s", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
-/// Parses a seek target: `90`, `1:30` or `1:02:03`. Returns `None` for anything else.
+/// Parses a seek target: `90`, `90s`, `1:30` or `1:02:03`. Returns `None` for anything else.
+/// Like the old bot, fields after the first are not limited to 59 (`1:75` is 135 seconds).
 pub fn parse_time(input: &str) -> Option<u64> {
     let input = input.trim();
+    let input = if input.contains(':') { input } else { input.strip_suffix(['s', 'S']).unwrap_or(input) };
     if input.is_empty() {
         return None;
     }
@@ -23,15 +25,11 @@ pub fn parse_time(input: &str) -> Option<u64> {
         return None;
     }
     let mut total: u64 = 0;
-    for (i, part) in parts.iter().enumerate() {
+    for part in parts {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         let value: u64 = part.parse().ok()?;
-        // Minutes and seconds after the first field must be below 60.
-        if i > 0 && value >= 60 {
-            return None;
-        }
         total = total.checked_mul(60)?.checked_add(value)?;
     }
     Some(total)
@@ -69,11 +67,14 @@ mod tests {
         assert_eq!(parse_time("1:45"), Some(105));
         assert_eq!(parse_time("01:02:03"), Some(3723));
         assert_eq!(parse_time(" 2:00 "), Some(120));
+        assert_eq!(parse_time("90s"), Some(90));
+        assert_eq!(parse_time("1:75"), Some(135));
+        assert_eq!(parse_time("1:60"), Some(120));
     }
 
     #[test]
     fn parse_time_rejects_bad_input() {
-        for bad in ["", "abc", "-5", "1:", ":30", "1:60", "1:2:3:4", "1.5", "1:xx"] {
+        for bad in ["", "s", "abc", "-5", "1:", ":30", "1:30s", "1:2:3:4", "1.5", "1:xx"] {
             assert_eq!(parse_time(bad), None, "{bad:?}");
         }
     }
