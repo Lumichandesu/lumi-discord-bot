@@ -84,6 +84,7 @@ impl Handler {
         }
         let inv = Invocation {
             guild: msg.guild_id,
+            user: msg.author.id,
             voice_channel: Self::voice_channel(ctx, msg.guild_id, msg.author.id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
@@ -122,6 +123,7 @@ impl Handler {
         }
         let inv = Invocation {
             guild: cmd.guild_id,
+            user: cmd.user.id,
             voice_channel: Self::voice_channel(ctx, cmd.guild_id, cmd.user.id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,

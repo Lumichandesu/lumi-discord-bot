@@ -16,6 +16,8 @@ use url::{Host, Url};
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_MAX: usize = 150;
 const YTDLP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a request waits for its turn at yt-dlp before giving up.
+const GATE_WAIT: Duration = Duration::from_secs(30);
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,12 +357,18 @@ impl Resolver {
         cache.insert(key, (Instant::now() + CACHE_TTL, track.clone()));
     }
 
+    async fn turn(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        tokio::time::timeout(GATE_WAIT, self.gate.lock())
+            .await
+            .map_err(|_| "The bot is busy with other requests. Try again in a moment.".to_string())
+    }
+
     pub async fn resolve(&self, input: &str) -> Result<Track, String> {
         let key = input.trim().to_lowercase();
         if let Some(t) = self.cached(&key) {
             return Ok(t);
         }
-        let _turn = self.gate.lock().await;
+        let _turn = self.turn().await?;
         if let Some(t) = self.cached(&key) {
             return Ok(t);
         }
@@ -399,7 +407,7 @@ impl Resolver {
     /// Runs yt-dlp again on the track's page to get a fresh stream URL (the cache is skipped).
     pub async fn refresh(&self, track: &Track) -> Result<Track, String> {
         ensure_public(&track.url).await?;
-        let _turn = self.gate.lock().await;
+        let _turn = self.turn().await?;
         let raw = self.run_ytdlp(&track.url).await?;
         let fresh = parse_ytdlp_json(&raw, &track.url)?;
         ensure_public(&fresh.stream_url).await?;
@@ -502,6 +510,9 @@ impl Resolver {
         let args = [
             "--dump-single-json",
             "--no-playlist",
+            // A playlist-only link would otherwise resolve every entry and hold the gate for a minute.
+            "--playlist-items",
+            "1",
             "--skip-download",
             "-f",
             "251/ba/b",

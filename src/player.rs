@@ -1,11 +1,11 @@
 //! Per-guild playback state on top of songbird.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serenity::all::{ChannelId, GuildId, ShardManager};
+use serenity::all::{ChannelId, GuildId, ShardManager, UserId};
 use serenity::async_trait;
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent};
 use songbird::input::{HlsRequest, HttpRequest, Input};
@@ -13,7 +13,7 @@ use songbird::tracks::TrackHandle;
 use songbird::Songbird;
 use tokio::task::JoinHandle;
 
-use crate::queue::{Queue, RepeatMode};
+use crate::queue::{MAX_UPCOMING, Queue, RepeatMode};
 use crate::resolver::{Resolver, Track};
 
 /// Leave after this long with nothing playing and nothing queued.
@@ -57,6 +57,21 @@ pub struct Bot {
     /// One lock per guild so two play commands cannot join the same channel at once
     /// (songbird cancels an in-progress join when a second one starts).
     join_locks: Mutex<HashMap<GuildId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Users with a play request still resolving; one at a time each, so nobody can fill the
+    /// shared yt-dlp queue.
+    resolving: Mutex<HashSet<UserId>>,
+}
+
+/// Removes the user from `Bot::resolving` when the play request finishes.
+struct Resolving<'a> {
+    set: &'a Mutex<HashSet<UserId>>,
+    user: UserId,
+}
+
+impl Drop for Resolving<'_> {
+    fn drop(&mut self) {
+        self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.user);
+    }
 }
 
 pub struct PlayOutcome {
@@ -75,6 +90,7 @@ impl Bot {
             shard_manager: OnceLock::new(),
             players: Mutex::new(HashMap::new()),
             join_locks: Mutex::new(HashMap::new()),
+            resolving: Mutex::new(HashSet::new()),
         }
     }
 
@@ -94,7 +110,21 @@ impl Bot {
     }
 
     /// Resolves the query, joins the voice channel if needed, and starts or queues the track.
-    pub async fn play(self: &Arc<Self>, guild: GuildId, channel: ChannelId, query: &str) -> Result<PlayOutcome, String> {
+    pub async fn play(
+        self: &Arc<Self>,
+        guild: GuildId,
+        channel: ChannelId,
+        user: UserId,
+        query: &str,
+    ) -> Result<PlayOutcome, String> {
+        let queue_full = || format!("The queue is full ({MAX_UPCOMING} tracks).");
+        if self.with_player(guild, |p| p.queue.is_full()) == Some(true) {
+            return Err(queue_full());
+        }
+        if !self.resolving.lock().unwrap_or_else(|e| e.into_inner()).insert(user) {
+            return Err("Please wait until your previous request has finished.".into());
+        }
+        let resolving = Resolving { set: &self.resolving, user };
         let track = self.resolver.resolve(query).await?;
         if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
             self.probe(&track).await?;
@@ -108,9 +138,14 @@ impl Bot {
             }
         }
 
+        drop(resolving);
+
         let (start_now, repeat) = {
             let mut players = self.players();
             let player = players.entry(guild).or_default();
+            if player.queue.is_full() {
+                return Err(queue_full());
+            }
             (player.queue.enqueue(track.clone()), player.queue.repeat)
         };
         if start_now {

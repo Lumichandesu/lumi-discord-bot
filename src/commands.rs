@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serenity::all::{
     ChannelId, CommandOptionType, CreateActionRow, CreateCommand, CreateCommandOption, CreateEmbed,
-    CreateEmbedFooter, GuildId, InstallationContext, InteractionContext, Timestamp,
+    CreateEmbedFooter, GuildId, InstallationContext, InteractionContext, Timestamp, UserId,
 };
 
 use crate::embed::{self, COLOR_MAIN};
@@ -96,6 +96,7 @@ impl Reply {
 /// Who ran a command and where, gathered from the cache before any `.await`.
 pub struct Invocation {
     pub guild: Option<GuildId>,
+    pub user: UserId,
     pub voice_channel: Option<ChannelId>,
     pub rest_ms: u128,
     pub ws_ms: Option<u128>,
@@ -131,7 +132,7 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             }
             let guild = inv.guild()?;
             let channel = inv.voice()?;
-            let out = bot.play(guild, channel, args).await?;
+            let out = bot.play(guild, channel, inv.user, args).await?;
             if out.queued {
                 Reply::text(format!("🎵 Added to queue: **{}**", out.track.title))
             } else {

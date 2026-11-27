@@ -2,6 +2,9 @@
 
 use std::collections::VecDeque;
 
+/// Most tracks a guild can have waiting.
+pub const MAX_UPCOMING: usize = 500;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RepeatMode {
     #[default]
@@ -45,6 +48,10 @@ impl<T> Default for Queue<T> {
 impl<T> Queue<T> {
     pub fn is_idle(&self) -> bool {
         self.current.is_none() && self.upcoming.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.upcoming.len() >= MAX_UPCOMING
     }
 
     /// Adds a track. Returns `true` when the queue was idle and the track became `current`
@@ -191,6 +198,14 @@ mod tests {
         let mut q = queue(Some(1), &[2], RepeatMode::Queue);
         assert_eq!(q.skip_failed(), Some(&2));
         assert!(q.upcoming.is_empty());
+    }
+
+    #[test]
+    fn queue_reports_full_at_the_cap() {
+        let mut q = queue(Some(0), &(1..MAX_UPCOMING as u32).collect::<Vec<_>>(), RepeatMode::Off);
+        assert!(!q.is_full());
+        q.enqueue(9999);
+        assert!(q.is_full());
     }
 
     #[test]
