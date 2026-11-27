@@ -85,10 +85,27 @@ impl Handler {
         Self::voice_channel(ctx, guild, me)
     }
 
+    /// Only members who can manage roles in the server that owns the role channel may post the panel.
+    async fn may_send_panel(ctx: &Context, msg: &Message) -> bool {
+        let Some(guild) = msg.guild_id else { return false };
+        let owns_channel = ctx.cache.guild(guild).is_some_and(|g| g.channels.contains_key(&roles::TARGET_CHANNEL_ID));
+        if !owns_channel {
+            return false;
+        }
+        let Ok(member) = msg.member(ctx).await else { return false };
+        let Some(g) = ctx.cache.guild(guild) else { return false };
+        let Some(channel) = g.channels.get(&roles::TARGET_CHANNEL_ID) else { return false };
+        let perms = g.user_permissions_in(channel, &member);
+        perms.manage_roles() || perms.administrator()
+    }
+
     async fn on_prefix(&self, ctx: &Context, msg: &Message) {
         let Some((typed, args)) = commands::parse_prefix(&msg.content) else { return };
         // Posts the role panel; prefix-only and not listed in help, as in the old bot.
         if matches!(typed.to_lowercase().as_str(), "sendroles" | "send-roles") {
+            if !Self::may_send_panel(ctx, msg).await {
+                return;
+            }
             match roles::send_panel(ctx).await {
                 Ok(()) => {
                     let _ = msg.reply(&ctx.http, "✅ ส่งแผงรับยศเข้าห้องเรียบร้อยแล้ว!").await;
