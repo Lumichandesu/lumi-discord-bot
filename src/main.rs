@@ -6,6 +6,7 @@ mod lyrics;
 mod player;
 mod queue;
 mod resolver;
+mod stats;
 mod util;
 
 use std::sync::Arc;
@@ -74,6 +75,10 @@ impl Handler {
         ctx.cache.guild(guild?)?.voice_states.get(&user)?.channel_id
     }
 
+    fn guild_name(ctx: &Context, guild: Option<GuildId>) -> Option<String> {
+        Some(ctx.cache.guild(guild?)?.name.clone())
+    }
+
     fn bot_channel(ctx: &Context, guild: Option<GuildId>) -> Option<serenity::all::ChannelId> {
         let me = ctx.cache.current_user().id;
         Self::voice_channel(ctx, guild, me)
@@ -91,6 +96,10 @@ impl Handler {
             guild: msg.guild_id,
             user: msg.author.id,
             voice_channel: Self::voice_channel(ctx, msg.guild_id, msg.author.id),
+            text_channel: msg.channel_id,
+            guild_name: Self::guild_name(ctx, msg.guild_id),
+            username: msg.author.name.clone(),
+            target_user: None,
             bot_channel: Self::bot_channel(ctx, msg.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
@@ -125,6 +134,13 @@ impl Handler {
                 _ => String::new(),
             })
             .unwrap_or_default();
+        let target_user = cmd.data.options.iter().find_map(|o| match o.value {
+            CommandDataOptionValue::User(id) => {
+                let name = cmd.data.resolved.users.get(&id).map_or_else(|| id.to_string(), |u| u.name.clone());
+                Some((id, name))
+            }
+            _ => None,
+        });
 
         let started = Instant::now();
         if let Err(e) = cmd.defer(&ctx.http).await {
@@ -135,6 +151,10 @@ impl Handler {
             guild: cmd.guild_id,
             user: cmd.user.id,
             voice_channel: Self::voice_channel(ctx, cmd.guild_id, cmd.user.id),
+            text_channel: cmd.channel_id,
+            guild_name: Self::guild_name(ctx, cmd.guild_id),
+            username: cmd.user.name.clone(),
+            target_user,
             bot_channel: Self::bot_channel(ctx, cmd.guild_id),
             rest_ms: started.elapsed().as_millis(),
             ws_ms: self.ws_latency_ms(ctx).await,
@@ -184,7 +204,7 @@ impl Handler {
         let refreshed = || {
             bot.with_player(guild, |p| {
                 p.queue.current.as_ref().map(|t| {
-                    let (e, rows) = embed::now_playing(t, p.paused, p.queue.repeat);
+                    let (e, rows) = embed::now_playing(t, p.paused, p.queue.repeat, None);
                     CreateInteractionResponse::UpdateMessage(
                         CreateInteractionResponseMessage::new().embed(e).components(rows),
                     )
@@ -382,7 +402,7 @@ async fn selftest() -> Result<(), String> {
 
     // Open the stream the same way playback does and let songbird/symphonia probe the format.
     let songbird = songbird::Songbird::serenity();
-    let bot = Bot::new(songbird, http);
+    let bot = Bot::new(songbird, http, None);
     let mut input = bot.input_for(&track);
     let started = Instant::now();
     input = input
@@ -445,7 +465,9 @@ async fn main() {
 
 async fn run(config: Config) -> Result<(), String> {
     let songbird = songbird::Songbird::serenity();
-    let bot = Arc::new(Bot::new(songbird.clone(), http_client()));
+    let http = http_client();
+    let stats = stats::Stats::open(std::path::Path::new(stats::DB_PATH), http.clone())?;
+    let bot = Arc::new(Bot::new(songbird.clone(), http, Some(stats)));
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
@@ -457,6 +479,7 @@ async fn run(config: Config) -> Result<(), String> {
         .await
         .map_err(|e| format!("could not create the Discord client: {e}"))?;
     let _ = bot.shard_manager.set(client.shard_manager.clone());
+    let _ = bot.discord.set(client.http.clone());
 
     let shards = client.shard_manager.clone();
     tokio::spawn(async move {

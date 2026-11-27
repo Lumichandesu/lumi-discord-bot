@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serenity::all::{ChannelId, GuildId, ShardManager, UserId};
+use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId, Http, ShardManager, UserId};
 use serenity::async_trait;
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent};
 use songbird::input::{HlsRequest, HttpRequest, Input};
@@ -13,8 +13,10 @@ use songbird::tracks::TrackHandle;
 use songbird::Songbird;
 use tokio::task::JoinHandle;
 
+use crate::embed;
 use crate::queue::{MAX_UPCOMING, Queue, RepeatMode};
 use crate::resolver::{Resolver, Track};
+use crate::stats::{Play, Stats};
 
 /// Leave after this long with nothing playing and nothing queued.
 const IDLE_LEAVE: Duration = Duration::from_secs(180);
@@ -37,6 +39,21 @@ pub struct GuildPlayer {
     skip_requested: bool,
     /// The current track already failed once and was retried with a fresh stream URL.
     retried: bool,
+    /// Where the last play command came from; later tracks are announced here.
+    text_channel: Option<ChannelId>,
+}
+
+/// Why a track is being started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// The first track of a play command; the command's reply shows it.
+    First,
+    /// Queue advance, repeat, or the next track after a failure: announced in the text channel.
+    Next,
+    /// The same track again with a fresh stream URL after it failed.
+    Retry,
+    /// The same track restarted so it can seek.
+    SeekRestart,
 }
 
 impl GuildPlayer {
@@ -53,6 +70,9 @@ pub struct Bot {
     pub resolver: Resolver,
     pub started: Instant,
     pub shard_manager: OnceLock<Arc<ShardManager>>,
+    /// Discord REST client, used to announce tracks outside a command reply.
+    pub discord: OnceLock<Arc<Http>>,
+    pub stats: Option<Arc<Stats>>,
     players: Mutex<HashMap<GuildId, GuildPlayer>>,
     /// One lock per guild so two play commands cannot join the same channel at once
     /// (songbird cancels an in-progress join when a second one starts).
@@ -81,13 +101,15 @@ pub struct PlayOutcome {
 }
 
 impl Bot {
-    pub fn new(songbird: Arc<Songbird>, http: reqwest::Client) -> Self {
+    pub fn new(songbird: Arc<Songbird>, http: reqwest::Client, stats: Option<Stats>) -> Self {
         Self {
             songbird,
             resolver: Resolver::new(http.clone()),
             http,
             started: Instant::now(),
             shard_manager: OnceLock::new(),
+            discord: OnceLock::new(),
+            stats: stats.map(Arc::new),
             players: Mutex::new(HashMap::new()),
             join_locks: Mutex::new(HashMap::new()),
             resolving: Mutex::new(HashSet::new()),
@@ -114,6 +136,7 @@ impl Bot {
         self: &Arc<Self>,
         guild: GuildId,
         channel: ChannelId,
+        text_channel: ChannelId,
         user: UserId,
         query: &str,
     ) -> Result<PlayOutcome, String> {
@@ -125,7 +148,8 @@ impl Bot {
             return Err("Please wait until your previous request has finished.".into());
         }
         let resolving = Resolving { set: &self.resolving, user };
-        let track = self.resolver.resolve(query).await?;
+        let mut track = self.resolver.resolve(query).await?;
+        track.requester = Some(user);
         if track.protocol.as_deref().is_some_and(|p| p.starts_with("m3u8")) {
             self.probe(&track).await?;
         }
@@ -146,10 +170,11 @@ impl Bot {
             if player.queue.is_full() {
                 return Err(queue_full());
             }
+            player.text_channel = Some(text_channel);
             (player.queue.enqueue(track.clone()), player.queue.repeat)
         };
         if start_now {
-            self.play_current(guild, false).await;
+            self.play_current(guild, Start::First).await;
         }
         Ok(PlayOutcome { queued: !start_now, track, repeat })
     }
@@ -177,8 +202,9 @@ impl Bot {
     }
 
     /// Starts the queue's current track, or arms the idle timer when there is none.
-    /// `refresh` forces a new stream URL even when the stored one is still young.
-    async fn play_current(self: &Arc<Self>, guild: GuildId, refresh: bool) {
+    /// A retry forces a new stream URL even when the stored one is still young.
+    async fn play_current(self: &Arc<Self>, guild: GuildId, start: Start) {
+        let refresh = start == Start::Retry;
         let next = self.with_player(guild, |p| {
             p.cancel_idle();
             p.paused = false;
@@ -222,11 +248,39 @@ impl Bot {
         for (event, failed) in [(TrackEvent::End, false), (TrackEvent::Error, true)] {
             let _ = handle.add_event(Event::Track(event), TrackEnded { bot: self.clone(), guild, generation, failed });
         }
-        self.with_player(guild, |p| {
-            if p.generation == generation {
-                p.handle = Some(handle);
-            }
-        });
+        let announce = self
+            .with_player(guild, |p| {
+                let current = p.generation == generation;
+                if current {
+                    p.handle = Some(handle);
+                }
+                current.then_some((p.text_channel, p.queue.repeat))
+            })
+            .flatten();
+        let Some((text_channel, repeat)) = announce else { return };
+        if !matches!(start, Start::First | Start::Next) {
+            return;
+        }
+        if let Some(stats) = &self.stats {
+            stats.record(Play {
+                guild_id: guild.to_string(),
+                user_id: track.requester.map_or_else(|| "system".into(), |u| u.to_string()),
+                title: track.title.clone(),
+                artist: track.author.clone(),
+                duration: track.duration,
+            });
+        }
+        if start == Start::Next
+            && let (Some(http), Some(channel)) = (self.discord.get().cloned(), text_channel)
+        {
+            let (e, rows) = embed::now_playing(&track, false, repeat, Some(track.platform));
+            let msg = CreateMessage::new().embed(e).components(rows).allowed_mentions(CreateAllowedMentions::new());
+            tokio::spawn(async move {
+                if let Err(e) = channel.send_message(&http, msg).await {
+                    tracing::debug!("could not announce the next track in {guild}: {e}");
+                }
+            });
+        }
     }
 
     /// Opens an HLS stream and lets symphonia probe it, so formats it cannot demux (MPEG-TS
@@ -284,7 +338,7 @@ impl Bot {
             Some(retry)
         });
         if let Some(Some(retry)) = proceed {
-            self.play_current(guild, retry).await;
+            self.play_current(guild, if retry { Start::Retry } else { Start::Next }).await;
         }
     }
 
@@ -389,7 +443,7 @@ impl Bot {
             return false;
         }
         // A fresh stream only seeks forward from the start, which songbird supports.
-        self.play_current(guild, false).await;
+        self.play_current(guild, Start::SeekRestart).await;
         let Some(Some(handle)) = self.with_player(guild, |p| p.handle.clone()) else { return false };
         match handle.seek_async(Duration::from_secs(seconds)).await {
             Ok(_) => true,

@@ -139,6 +139,10 @@ pub struct Track {
     pub filesize: Option<u64>,
     /// When yt-dlp produced `stream_url`. Signed stream URLs expire, so old ones are refreshed.
     pub resolved_at: Instant,
+    /// Platform label shown on the now-playing embed (`YOUTUBE`, `SOUNDCLOUD`).
+    pub platform: &'static str,
+    /// Who queued the track; set by the player, not by the resolver.
+    pub requester: Option<serenity::all::UserId>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +187,8 @@ pub fn parse_ytdlp_json(raw: &str, fallback_url: &str) -> Result<Track, String> 
         http_headers: entry.http_headers.map(|h| h.into_iter().collect()).unwrap_or_default(),
         filesize: entry.filesize,
         resolved_at: Instant::now(),
+        platform: "YOUTUBE",
+        requester: None,
     })
 }
 
@@ -395,8 +401,12 @@ impl Resolver {
         };
 
         let raw = self.run_ytdlp(&target).await?;
-        let track = parse_ytdlp_json(&raw, &target)?;
+        let mut track = parse_ytdlp_json(&raw, &target)?;
         if direct {
+            // Direct links show their site; searches and bridge links play from YouTube.
+            if Url::parse(&target).ok().and_then(|u| detect_provider(&u)) == Some(Provider::SoundCloud) {
+                track.platform = "SOUNDCLOUD";
+            }
             // A generic page can point yt-dlp at media on an internal host.
             ensure_public(&track.stream_url).await?;
         }
@@ -409,8 +419,10 @@ impl Resolver {
         ensure_public(&track.url).await?;
         let _turn = self.turn().await?;
         let raw = self.run_ytdlp(&track.url).await?;
-        let fresh = parse_ytdlp_json(&raw, &track.url)?;
+        let mut fresh = parse_ytdlp_json(&raw, &track.url)?;
         ensure_public(&fresh.stream_url).await?;
+        fresh.platform = track.platform;
+        fresh.requester = track.requester;
         Ok(fresh)
     }
 

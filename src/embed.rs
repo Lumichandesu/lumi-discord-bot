@@ -1,6 +1,8 @@
 //! The now-playing embed and its control buttons.
 
-use serenity::all::{ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, ReactionType, Timestamp};
+use serenity::all::{
+    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, ReactionType, Timestamp,
+};
 
 use crate::queue::RepeatMode;
 use crate::resolver::Track;
@@ -13,7 +15,13 @@ fn button(id: &str, emoji: &str, style: ButtonStyle) -> CreateButton {
     CreateButton::new(id).emoji(ReactionType::Unicode(emoji.into())).style(style)
 }
 
-pub fn now_playing(track: &Track, paused: bool, repeat: RepeatMode) -> (CreateEmbed, Vec<CreateActionRow>) {
+/// `platform` is only known when a track is announced; command replies show `NATIVE AUDIO`.
+pub fn now_playing(
+    track: &Track,
+    paused: bool,
+    repeat: RepeatMode,
+    platform: Option<&str>,
+) -> (CreateEmbed, Vec<CreateActionRow>) {
     let title = if track.title.chars().count() > 60 {
         format!("{}...", truncate_chars(&track.title, 57))
     } else {
@@ -28,7 +36,11 @@ pub fn now_playing(track: &Track, paused: bool, repeat: RepeatMode) -> (CreateEm
         .field("Artist", format!("`{author}`"), true)
         .field("Duration", format!("`{}`", format_duration(track.duration)), true)
         .field("Loop", format!("`{}`", repeat.as_str().to_uppercase()), true)
-        .timestamp(Timestamp::now());
+        .field("Bitrate", "`128 kbps (HD)`", true)
+        .field("Codec", "`Opus 48kHz`", true)
+        .field("Platform", format!("`{}`", platform.unwrap_or("Native Audio").to_uppercase()), true)
+        .timestamp(Timestamp::now())
+        .footer(CreateEmbedFooter::new("Lumi Bot | Ultra-Low Latency Audio"));
     if let Some(thumb) = &track.thumbnail {
         embed = embed.thumbnail(thumb);
     }

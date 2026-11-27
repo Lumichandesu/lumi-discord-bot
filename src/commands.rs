@@ -11,6 +11,7 @@ use serenity::all::{
 use crate::embed::{self, COLOR_MAIN};
 use crate::lyrics;
 use crate::player::{Bot, GuildPlayer};
+use crate::stats;
 use crate::util::{format_duration, format_uptime, parse_time, truncate_chars};
 
 pub const PREFIX: char = '\\';
@@ -34,6 +35,9 @@ pub const SPECS: &[Spec] = &[
     ("lyrics", "Show lyrics for the current song or a search", Some(("query", "Song title (defaults to the current track)", CommandOptionType::String, false))),
     ("seek", "Jump to a time in the current track", Some(("time", "mm:ss, h:mm:ss or seconds", CommandOptionType::String, true))),
     ("help", "List commands", None),
+    ("stats", "View server or user music statistics", Some(("user", "Target user", CommandOptionType::User, false))),
+    ("mystats", "View your personal music statistics", None),
+    ("top", "View top played songs in this server", None),
 ];
 
 pub fn slash_commands() -> Vec<CreateCommand> {
@@ -62,6 +66,7 @@ pub fn canonical(name: &str) -> Option<&'static str> {
         "q" => "queue",
         "h" => "help",
         "l" => "lyrics",
+        "leaderboard" => "top",
         other => other,
     };
     SPECS.iter().map(|s| s.0).find(|n| *n == alias)
@@ -100,6 +105,12 @@ pub struct Invocation {
     pub guild: Option<GuildId>,
     pub user: UserId,
     pub voice_channel: Option<ChannelId>,
+    /// The text channel the command was used in.
+    pub text_channel: ChannelId,
+    pub guild_name: Option<String>,
+    pub username: String,
+    /// The `user` option of `/stats`, with that user's name.
+    pub target_user: Option<(UserId, String)>,
     /// The bot's own voice channel in this guild, if it is in one.
     pub bot_channel: Option<ChannelId>,
     pub rest_ms: u128,
@@ -140,11 +151,11 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             }
             let guild = inv.guild_in_voice()?;
             let channel = inv.voice()?;
-            let out = bot.play(guild, channel, inv.user, args).await?;
+            let out = bot.play(guild, channel, inv.text_channel, inv.user, args).await?;
             if out.queued {
                 Reply::text(format!("🎵 Added to queue: **{}**", out.track.title))
             } else {
-                let (e, rows) = embed::now_playing(&out.track, false, out.repeat);
+                let (e, rows) = embed::now_playing(&out.track, false, out.repeat, None);
                 Reply { content: None, embed: Some(e), components: rows, error: false }
             }
         }
@@ -262,6 +273,26 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
             }
         }
         "help" => Reply::embed(help_embed()),
+        "stats" | "mystats" | "top" => {
+            let (Some(guild), Some(db)) = (inv.guild, bot.stats.as_ref()) else { return Ok(Reply::default()) };
+            let guild_name = inv.guild_name.as_deref().unwrap_or("Server");
+            let own = (inv.user, inv.username.clone());
+            let first = args.split_whitespace().next().unwrap_or("").to_lowercase();
+            let target = match name {
+                "mystats" => Some(own),
+                "stats" if matches!(first.as_str(), "me" | "user") => Some(own),
+                "stats" => inv.target_user.clone(),
+                _ => None,
+            };
+            let embed = match (name, target) {
+                ("top", _) => stats::leaderboard_embed(&db.top(guild.to_string()).await?, guild_name),
+                (_, Some((user, username))) => {
+                    stats::user_embed(&db.user(guild.to_string(), user.to_string()).await?, &username)
+                }
+                _ => stats::server_embed(&db.server(guild.to_string()).await?, guild_name),
+            };
+            Reply::embed(embed)
+        }
         _ => return Err("Unknown command.".into()),
     })
 }
@@ -370,7 +401,8 @@ mod tests {
         assert_eq!(canonical("l"), Some("lyrics"));
         assert_eq!(canonical("seek"), Some("seek"));
         assert_eq!(canonical("nope"), None);
-        assert_eq!(SPECS.len(), 15);
+        assert_eq!(canonical("Leaderboard"), Some("top"));
+        assert_eq!(SPECS.len(), 18);
     }
 
     #[test]
