@@ -27,6 +27,9 @@ pub struct GuildPlayer {
     /// Increases every time a track starts or ends, so stale songbird events can be ignored.
     generation: u64,
     idle_task: Option<JoinHandle<()>>,
+    /// Set while a seek is in flight. A failed seek errors the track in songbird; that error
+    /// must restart the track instead of dropping it from the queue.
+    seeking: bool,
 }
 
 impl GuildPlayer {
@@ -176,6 +179,10 @@ impl Bot {
             if p.generation != generation {
                 return false;
             }
+            if failed && p.seeking {
+                // seek() sees the same failure and restarts the track at the target.
+                return false;
+            }
             p.generation += 1;
             p.handle = None;
             if failed {
@@ -260,12 +267,40 @@ impl Bot {
         .unwrap_or(false)
     }
 
-    pub async fn seek(&self, guild: GuildId, seconds: u64) -> bool {
+    pub async fn seek(self: &Arc<Self>, guild: GuildId, seconds: u64) -> bool {
+        let Some(Some((handle, generation))) = self.with_player(guild, |p| {
+            p.seeking = true;
+            p.handle.clone().map(|h| (h, p.generation))
+        }) else {
+            self.with_player(guild, |p| p.seeking = false);
+            return false;
+        };
+        let result = handle.seek_async(Duration::from_secs(seconds)).await;
+        let restart = self
+            .with_player(guild, |p| {
+                p.seeking = false;
+                let restart = result.is_err() && p.generation == generation;
+                if restart {
+                    // The stream cannot seek backwards inside the data already read, and songbird
+                    // has dropped the input. Ignore its error event and start the track again.
+                    p.generation += 1;
+                    p.handle = None;
+                }
+                restart
+            })
+            .unwrap_or(false);
+        let Err(e) = result else { return true };
+        tracing::warn!("seek failed in {guild}: {e}");
+        if !restart {
+            return false;
+        }
+        // A fresh stream only seeks forward from the start, which songbird supports.
+        self.play_current(guild).await;
         let Some(Some(handle)) = self.with_player(guild, |p| p.handle.clone()) else { return false };
         match handle.seek_async(Duration::from_secs(seconds)).await {
             Ok(_) => true,
             Err(e) => {
-                tracing::warn!("seek failed in {guild}: {e}");
+                tracing::warn!("seek after restart failed in {guild}: {e}");
                 false
             }
         }
