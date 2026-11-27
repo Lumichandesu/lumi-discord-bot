@@ -1,0 +1,28 @@
+[package]
+name = "lumi-discord-bot"
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+description = "Self-hosted Discord music bot written in Rust with serenity, songbird and yt-dlp"
+
+[dependencies]
+serenity = { version = "0.12.5", default-features = false, features = ["builder", "cache", "client", "gateway", "http", "model", "rustls_backend", "voice"] }
+songbird = { version = "0.6.1", default-features = false, features = ["driver", "gateway", "rustls", "serenity", "tungstenite"] }
+symphonia = { version = "0.5", default-features = false, features = ["mkv", "ogg", "aac", "isomp4", "mp3", "pcm", "wav", "vorbis", "flac"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "sync", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+fastrand = "2"
+memory-stats = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
