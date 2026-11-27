@@ -2,7 +2,6 @@
 
 Lumi is a self-hosted Discord music bot written in Rust with serenity and songbird. It plays audio in voice channels from YouTube and SoundCloud links or plain search text, using yt-dlp to find the audio stream. Spotify, Apple Music and TIDAL links are read only for the track title and artist; the audio then comes from a YouTube search for that text. It runs as a single binary with no Lavalink server and no FFmpeg.
 
-Version 2 is a rewrite of the earlier Bun and discord.js bot, which is kept in `legacy-ts/` for comparison.
 
 ## Features
 
