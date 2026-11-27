@@ -7,15 +7,34 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use url::{Host, Url};
 
+use crate::worker::Worker;
+
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_MAX: usize = 150;
 const YTDLP_TIMEOUT: Duration = Duration::from_secs(60);
+/// yt-dlp options for every lookup; `YTDLP_EXTRA_ARGS` go before them and the target after.
+const YTDLP_ARGS: [&str; 11] = [
+    "--dump-single-json",
+    "--no-playlist",
+    // A playlist-only link would otherwise resolve every entry and hold the gate for a minute.
+    "--playlist-items",
+    "1",
+    "--skip-download",
+    "-f",
+    // Live streams have no audio-only format; a 360p one keeps 128 kbps audio
+    // without pulling a full HD video stream.
+    "251/ba/b[height<=360]/b",
+    "--no-warnings",
+    "--no-progress",
+    "--socket-timeout",
+    "5",
+];
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +163,7 @@ pub struct Track {
 }
 
 #[derive(Debug, Deserialize)]
-struct YtDlpJson {
+pub struct YtDlpJson {
     title: Option<String>,
     uploader: Option<String>,
     channel: Option<String>,
@@ -162,6 +181,10 @@ struct YtDlpJson {
 pub fn parse_ytdlp_json(raw: &str, fallback_url: &str) -> Result<Track, String> {
     let parsed: YtDlpJson =
         serde_json::from_str(raw).map_err(|e| format!("Could not read yt-dlp output: {e}"))?;
+    track_from_json(parsed, fallback_url)
+}
+
+fn track_from_json(parsed: YtDlpJson, fallback_url: &str) -> Result<Track, String> {
     let entry = match parsed.entries {
         Some(mut entries) if !entries.is_empty() => entries.swap_remove(0),
         Some(_) => return Err("No results found.".into()),
@@ -322,14 +345,26 @@ pub struct Resolver {
     /// `YTDLP_EXTRA_ARGS`, split on whitespace and passed before the target.
     extra_args: Vec<String>,
     cache: Mutex<HashMap<String, (Instant, Track)>>,
-    /// yt-dlp runs one at a time, like the old bot, to keep CPU spikes low on small machines.
+    /// Spawned yt-dlp runs one at a time, like the old bot, to keep CPU spikes low on small machines.
     gate: tokio::sync::Mutex<()>,
+    /// The warm yt-dlp process, used instead of spawning yt-dlp when it is available.
+    pub worker: Arc<Worker>,
 }
 
 impl Resolver {
     pub fn new(http: reqwest::Client) -> Self {
-        let extra_args = std::env::var("YTDLP_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
-        Self { http, ytdlp: find_ytdlp(), extra_args, cache: Mutex::new(HashMap::new()), gate: tokio::sync::Mutex::new(()) }
+        let extra_args: Vec<String> =
+            std::env::var("YTDLP_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
+        let ytdlp = find_ytdlp();
+        let worker_args = extra_args.iter().cloned().chain(YTDLP_ARGS.iter().map(|a| a.to_string())).collect();
+        Self {
+            http,
+            worker: Worker::new(&ytdlp, worker_args),
+            ytdlp,
+            extra_args,
+            cache: Mutex::new(HashMap::new()),
+            gate: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub fn ytdlp_program(&self) -> &str {
@@ -363,11 +398,6 @@ impl Resolver {
         if let Some(t) = self.cached(&key) {
             return Ok(t);
         }
-        // Requests wait in line for yt-dlp as long as needed, like the old bot's queue.
-        let _turn = self.gate.lock().await;
-        if let Some(t) = self.cached(&key) {
-            return Ok(t);
-        }
 
         let mut direct = false;
         let target = match classify(input) {
@@ -390,8 +420,7 @@ impl Resolver {
             }
         };
 
-        let raw = self.run_ytdlp(&target).await?;
-        let mut track = parse_ytdlp_json(&raw, &target)?;
+        let mut track = self.extract(&target).await?;
         if direct {
             // Direct links show their site; searches and bridge links play from YouTube.
             if Url::parse(&target).ok().and_then(|u| detect_provider(&u)) == Some(Provider::SoundCloud) {
@@ -407,13 +436,38 @@ impl Resolver {
     /// Runs yt-dlp again on the track's page to get a fresh stream URL (the cache is skipped).
     pub async fn refresh(&self, track: &Track) -> Result<Track, String> {
         ensure_public(&track.url).await?;
-        let _turn = self.gate.lock().await;
-        let raw = self.run_ytdlp(&track.url).await?;
-        let mut fresh = parse_ytdlp_json(&raw, &track.url)?;
+        let mut fresh = self.extract(&track.url).await?;
         ensure_public(&fresh.stream_url).await?;
         fresh.platform = track.platform;
         fresh.requester = track.requester;
         Ok(fresh)
+    }
+
+    /// Runs yt-dlp on `target`: in the warm worker when it is available, otherwise as a new process.
+    async fn extract(&self, target: &str) -> Result<Track, String> {
+        let answer = match self.worker.extract(target, YTDLP_TIMEOUT).await {
+            Ok(answer) => answer,
+            Err(_) => return self.extract_spawned(target).await,
+        };
+        match answer {
+            Ok(value) => {
+                let parsed: YtDlpJson =
+                    serde_json::from_value(value).map_err(|e| format!("Could not read yt-dlp output: {e}"))?;
+                track_from_json(parsed, target)
+            }
+            Err(line) => {
+                tracing::warn!("yt-dlp failed for {target}: {line}");
+                Err(line.trim().trim_start_matches("ERROR: ").to_string())
+            }
+        }
+    }
+
+    /// Runs yt-dlp as its own process, the path used when the worker is not available.
+    pub async fn extract_spawned(&self, target: &str) -> Result<Track, String> {
+        // Requests wait in line for yt-dlp as long as needed, like the old bot's queue.
+        let _turn = self.gate.lock().await;
+        let raw = self.run_ytdlp(target).await?;
+        parse_ytdlp_json(&raw, target)
     }
 
     async fn bridge_query(&self, url: &str, provider: Provider) -> Option<String> {
@@ -509,23 +563,6 @@ impl Resolver {
     }
 
     async fn run_ytdlp(&self, target: &str) -> Result<String, String> {
-        let args = [
-            "--dump-single-json",
-            "--no-playlist",
-            // A playlist-only link would otherwise resolve every entry and hold the gate for a minute.
-            "--playlist-items",
-            "1",
-            "--skip-download",
-            "-f",
-            // Live streams have no audio-only format; a 360p one keeps 128 kbps audio
-            // without pulling a full HD video stream.
-            "251/ba/b[height<=360]/b",
-            "--no-warnings",
-            "--no-progress",
-            "--socket-timeout",
-            "5",
-            target,
-        ];
         // Run yt-dlp at the lowest CPU priority on Unix, as the old bot did.
         let mut cmd = if cfg!(unix) {
             let mut c = tokio::process::Command::new("nice");
@@ -534,7 +571,7 @@ impl Resolver {
         } else {
             tokio::process::Command::new(&self.ytdlp)
         };
-        cmd.args(&self.extra_args).args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        cmd.args(&self.extra_args).args(YTDLP_ARGS).arg(target).stdin(std::process::Stdio::null()).kill_on_drop(true);
 
         let output = tokio::time::timeout(YTDLP_TIMEOUT, cmd.output())
             .await

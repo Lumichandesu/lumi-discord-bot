@@ -9,6 +9,7 @@ mod resolver;
 mod roles;
 mod stats;
 mod util;
+mod worker;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -549,6 +550,7 @@ async fn run(config: Config) -> Result<(), String> {
     let http = http_client();
     let stats = stats::Stats::open(std::path::Path::new(stats::DB_PATH), http.clone())?;
     let bot = Arc::new(Bot::new(songbird.clone(), http, Some(stats)));
+    bot.resolver.worker.prewarm();
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
