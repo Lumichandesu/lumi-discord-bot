@@ -18,6 +18,8 @@ use crate::worker::Worker;
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_MAX: usize = 150;
 const YTDLP_TIMEOUT: Duration = Duration::from_secs(60);
+/// The InnerTube search is only a shortcut; a slow answer falls back to `ytsearch1:`.
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 /// yt-dlp options for every lookup; `YTDLP_EXTRA_ARGS` go before them and the target after.
 const YTDLP_ARGS: [&str; 11] = [
     "--dump-single-json",
@@ -401,7 +403,13 @@ impl Resolver {
 
         let mut direct = false;
         let target = match classify(input) {
-            Target::Search(q) => format!("ytsearch1:{q}"),
+            Target::Search(q) => {
+                if let Some(track) = self.fast_search(&q).await {
+                    self.store(key, &track);
+                    return Ok(track);
+                }
+                format!("ytsearch1:{q}")
+            }
             Target::Direct(url) => {
                 ensure_public(&url).await?;
                 direct = true;
@@ -441,6 +449,52 @@ impl Resolver {
         fresh.platform = track.platform;
         fresh.requester = track.requester;
         Ok(fresh)
+    }
+
+    /// Plain-text search: find the first video with YouTube's own search API (about 0.4 s), then
+    /// open its page with yt-dlp, which is quicker than yt-dlp's `ytsearch1:`. `None` means the
+    /// caller should search with `ytsearch1:` instead.
+    async fn fast_search(&self, query: &str) -> Option<Track> {
+        let id = match self.innertube_search(query).await {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::debug!("InnerTube search failed for {query:?}: {e}");
+                return None;
+            }
+        };
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        match self.extract(&url).await {
+            Ok(track) => Some(track),
+            Err(e) => {
+                tracing::info!("fast search pick {id} failed ({e}); searching with yt-dlp");
+                None
+            }
+        }
+    }
+
+    /// The first video result of a YouTube search, as yt-dlp's `ytsearch1:` would pick it.
+    pub async fn innertube_search(&self, query: &str) -> Result<Option<String>, String> {
+        let body = serde_json::json!({
+            "context": { "client": { "clientName": "WEB", "clientVersion": INNERTUBE_WEB_VERSION, "hl": "en", "gl": "US" } },
+            "query": query,
+            // Videos only, the filter yt-dlp's YouTube search uses.
+            "params": "EgIQAfABAQ==",
+        });
+        let res = self
+            .http
+            .post("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+            .header(reqwest::header::USER_AGENT, BROWSER_UA)
+            .json(&body)
+            .timeout(SEARCH_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+        let parsed: SearchResponse = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        Ok(first_video_id(parsed))
     }
 
     /// Runs yt-dlp on `target`: in the warm worker when it is available, otherwise as a new process.
@@ -593,6 +647,68 @@ impl Resolver {
     }
 }
 
+/// The WEB client version yt-dlp itself sends to InnerTube.
+const INNERTUBE_WEB_VERSION: &str = "2.20260708.00.00";
+
+/// Only the path to the search results is read; serde skips the rest of the large response.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SearchResponse {
+    contents: SearchContents,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SearchContents {
+    two_column_search_results_renderer: TwoColumn,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct TwoColumn {
+    primary_contents: PrimaryContents,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct PrimaryContents {
+    section_list_renderer: Section,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Section {
+    contents: Vec<SectionItem>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SectionItem {
+    item_section_renderer: Option<Section>,
+    video_renderer: Option<VideoRenderer>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct VideoRenderer {
+    video_id: Option<String>,
+}
+
+/// The first video in the search results, skipping ads, shelves and other renderers.
+fn first_video_id(res: SearchResponse) -> Option<String> {
+    let valid = |id: &str| id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    res.contents
+        .two_column_search_results_renderer
+        .primary_contents
+        .section_list_renderer
+        .contents
+        .into_iter()
+        .filter_map(|s| s.item_section_renderer)
+        .flat_map(|s| s.contents)
+        .filter_map(|item| item.video_renderer?.video_id)
+        .find(|id| valid(id))
+}
+
 /// `YTDLP_PATH` if it points to a file, then `~/bin/yt-dlp`, then `yt-dlp` on PATH.
 fn find_ytdlp() -> String {
     if let Ok(p) = std::env::var("YTDLP_PATH")
@@ -707,6 +823,23 @@ mod tests {
         assert_eq!(t.url, "https://www.youtube.com/watch?v=a");
         assert_eq!(t.protocol.as_deref(), Some("https"));
         assert_eq!(t.http_headers, vec![("User-Agent".to_string(), "ua".to_string())]);
+    }
+
+    #[test]
+    fn picks_first_video_from_innertube_search() {
+        let raw = r#"{"contents":{"twoColumnSearchResultsRenderer":{"primaryContents":{"sectionListRenderer":{"contents":[
+            {"itemSectionRenderer":{"contents":[
+                {"adSlotRenderer":{}},
+                {"reelShelfRenderer":{"items":[]}},
+                {"videoRenderer":{"videoId":"bad"}},
+                {"videoRenderer":{"videoId":"ZRtdQ81jPUQ","title":{}}},
+                {"videoRenderer":{"videoId":"kxs9Su_mbpU"}}
+            ]}},
+            {"continuationItemRenderer":{}}
+        ]}}}}}"#;
+        assert_eq!(first_video_id(serde_json::from_str(raw).unwrap()).as_deref(), Some("ZRtdQ81jPUQ"));
+        assert_eq!(first_video_id(serde_json::from_str("{}").unwrap()), None);
+        assert_eq!(first_video_id(serde_json::from_str(r#"{"contents":{"x":1}}"#).unwrap()), None);
     }
 
     #[test]
