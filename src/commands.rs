@@ -215,10 +215,13 @@ async fn dispatch(bot: &Arc<Bot>, inv: &Invocation, name: &str, args: &str) -> R
                 Ok(Some(l)) => Reply::embed(
                     CreateEmbed::new()
                         .color(COLOR_MAIN)
-                        .title(format!(
-                            "📝 {} - {}",
-                            l.track_name.as_deref().unwrap_or("Unknown"),
-                            l.artist_name.as_deref().unwrap_or("Unknown")
+                        .title(truncate_chars(
+                            &format!(
+                                "📝 {} - {}",
+                                l.track_name.as_deref().unwrap_or("Unknown"),
+                                l.artist_name.as_deref().unwrap_or("Unknown")
+                            ),
+                            256,
                         ))
                         .description(truncate_chars(l.plain_lyrics.as_deref().unwrap_or(""), 3900))
                         .footer(CreateEmbedFooter::new("Lyrics provided by LRCLIB"))
@@ -266,7 +269,7 @@ pub fn queue_text(p: &GuildPlayer, limit: usize, durations: bool) -> Option<Stri
         return None;
     }
     let mut text = match &p.queue.current {
-        Some(t) => format!("🎶 **Now Playing:** [{}]({})\n\n", t.title, t.url),
+        Some(t) => format!("🎶 **Now Playing:** [{}]({})\n\n", truncate_chars(&t.title, 60), t.url),
         None => "🎶 **Now Playing:** None\n\n".into(),
     };
     let total = p.queue.upcoming.len();
@@ -274,7 +277,7 @@ pub fn queue_text(p: &GuildPlayer, limit: usize, durations: bool) -> Option<Stri
         let label = if durations { "Up Next" } else { "Queue" };
         text += &format!("📜 **{label} ({total} tracks):**\n");
         for (i, t) in p.queue.upcoming.iter().take(limit).enumerate() {
-            text += &format!("`{}.` [{}]({})", i + 1, t.title, t.url);
+            text += &format!("`{}.` [{}]({})", i + 1, truncate_chars(&t.title, 60), t.url);
             if durations {
                 text += &format!(" - `{}`", format_duration(t.duration));
             }

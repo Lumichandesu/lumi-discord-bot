@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serenity::all::{
     ActivityData, ApplicationId, Command, CommandDataOptionValue, CommandInteraction, ComponentInteraction,
-    Context, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
+    Context, CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
     CreateMessage, EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Http, Interaction, Message, Ready,
     UserId, VoiceState,
 };
@@ -23,7 +23,7 @@ use songbird::SerenityInit;
 
 use crate::commands::Invocation;
 use crate::player::Bot;
-use crate::util::{format_duration, truncate_chars};
+use crate::util::{MESSAGE_MAX, format_duration, truncate_chars};
 
 /// Settings read from the environment (or a `.env` file).
 struct Config {
@@ -91,9 +91,13 @@ impl Handler {
         };
         let reply = commands::run(&self.bot, &inv, name, args).await;
 
-        let mut out = CreateMessage::new().reference_message(msg).components(reply.components);
+        // Replies echo user text and track titles: never let them ping @everyone, roles or users.
+        let mut out = CreateMessage::new()
+            .reference_message(msg)
+            .allowed_mentions(CreateAllowedMentions::new().replied_user(true))
+            .components(reply.components);
         if let Some(c) = reply.content {
-            out = out.content(c);
+            out = out.content(truncate_chars(&c, MESSAGE_MAX));
         }
         if let Some(e) = reply.embed {
             out = out.embed(e);
@@ -130,9 +134,10 @@ impl Handler {
         };
         let reply = commands::run(&self.bot, &inv, name, args.trim()).await;
 
-        let mut edit = EditInteractionResponse::new().components(reply.components);
+        let mut edit =
+            EditInteractionResponse::new().allowed_mentions(CreateAllowedMentions::new()).components(reply.components);
         if let Some(c) = reply.content {
-            edit = edit.content(c);
+            edit = edit.content(truncate_chars(&c, MESSAGE_MAX));
         }
         if let Some(e) = reply.embed {
             edit = edit.embed(e);
@@ -144,7 +149,12 @@ impl Handler {
 
     async fn on_button(&self, ctx: &Context, i: &ComponentInteraction) {
         let ephemeral = |text: String| {
-            CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(text).ephemeral(true))
+            CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content(truncate_chars(&text, MESSAGE_MAX))
+                    .allowed_mentions(CreateAllowedMentions::new())
+                    .ephemeral(true),
+            )
         };
         let Some(guild) = i.guild_id.filter(|g| self.bot.has_player(*g)) else {
             let _ = i.create_response(&ctx.http, ephemeral("❌ No active music player.".into())).await;
@@ -210,14 +220,19 @@ impl Handler {
             return;
         }
         let query = commands::current_query(&self.bot, guild).unwrap_or_else(|| title.clone());
+        let title = truncate_chars(&title, 100);
         let text = match lyrics::search(&self.bot.http, &query, Duration::from_secs(4)).await {
-            Ok(Some(l)) => format!(
-                "📝 **Lyrics for {title}:**\n\n{}",
-                truncate_chars(l.plain_lyrics.as_deref().unwrap_or(""), 1900)
-            ),
+            Ok(Some(l)) => {
+                let header = format!("📝 **Lyrics for {title}:**\n\n");
+                let room = MESSAGE_MAX - header.chars().count();
+                format!("{header}{}", truncate_chars(l.plain_lyrics.as_deref().unwrap_or(""), room))
+            }
             _ => format!("❌ No lyrics found for **{title}**."),
         };
-        let followup = CreateInteractionResponseFollowup::new().content(text).ephemeral(true);
+        let followup = CreateInteractionResponseFollowup::new()
+            .content(text)
+            .allowed_mentions(CreateAllowedMentions::new())
+            .ephemeral(true);
         if let Err(e) = i.create_followup(&ctx.http, followup).await {
             tracing::warn!("lyrics button failed: {e}");
         }

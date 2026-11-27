@@ -35,6 +35,9 @@ pub fn parse_time(input: &str) -> Option<u64> {
     Some(total)
 }
 
+/// Discord's limit for message content, in characters.
+pub const MESSAGE_MAX: usize = 2000;
+
 /// Truncates to at most `max` characters without splitting a UTF-8 character.
 pub fn truncate_chars(s: &str, max: usize) -> &str {
     match s.char_indices().nth(max) {
