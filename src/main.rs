@@ -508,6 +508,25 @@ async fn main() {
     }
 }
 
+/// Waits for Ctrl+C, or on Unix also for SIGTERM, which `systemctl stop` and `restart` send.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(e) => tracing::warn!("could not listen for SIGTERM: {e}"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 async fn run(config: Config) -> Result<(), String> {
     let songbird = songbird::Songbird::serenity();
     let http = http_client();
@@ -528,7 +547,7 @@ async fn run(config: Config) -> Result<(), String> {
 
     let shards = client.shard_manager.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown_signal().await;
         tracing::info!("shutting down");
         shards.shutdown_all().await;
     });
