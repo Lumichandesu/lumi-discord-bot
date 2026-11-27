@@ -57,6 +57,12 @@ The slash commands have the same names, for example `/play query:...` and `/seek
    ./target/release/lumi-discord-bot              # start the bot
    ```
 
+   The release profile uses fat LTO with one codegen unit, and the final link needs well over 1 GB of memory. On a small server such as a 1 GB e2-micro, build on another Linux machine (or WSL or Docker) with the same or an older glibc and copy `target/release/lumi-discord-bot` over. To build on the server itself, add swap and lower the link cost:
+
+   ```bash
+   CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4 cargo build --release -j 1
+   ```
+
 `./target/release/lumi-discord-bot --selftest` checks the parts that do not need Discord: it searches YouTube through yt-dlp, opens the audio stream and checks that it can be decoded. It skips the test if yt-dlp is not installed.
 
 ## Development
