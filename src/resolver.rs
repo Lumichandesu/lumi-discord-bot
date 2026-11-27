@@ -18,8 +18,13 @@ use crate::worker::Worker;
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const CACHE_MAX: usize = 150;
 const YTDLP_TIMEOUT: Duration = Duration::from_secs(60);
-/// The InnerTube search is only a shortcut; a slow answer falls back to `ytsearch1:`.
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
+/// The InnerTube search is only a shortcut; a slow answer falls back to `ytsearch1:`. It
+/// normally answers in about 0.4 s.
+const SEARCH_TIMEOUT: Duration = Duration::from_millis(1500);
+/// After this many InnerTube searches in a row fail or find nothing, searches skip it for a while,
+/// so a changed or blocked API does not slow every search down.
+const SEARCH_MAX_MISSES: u32 = 3;
+const SEARCH_PAUSE: Duration = Duration::from_secs(5 * 60);
 /// yt-dlp options for every lookup; `YTDLP_EXTRA_ARGS` go before them and the target after.
 const YTDLP_ARGS: [&str; 11] = [
     "--dump-single-json",
@@ -365,6 +370,8 @@ pub struct Resolver {
     /// `extra_args` send yt-dlp through a proxy, another address or with cookies.
     routed_args: bool,
     cache: Mutex<HashMap<String, (Instant, Track)>>,
+    /// InnerTube searches that failed in a row, and until when it is skipped.
+    search_misses: Mutex<(u32, Option<Instant>)>,
     /// Spawned yt-dlp runs one at a time, like the old bot, to keep CPU spikes low on small machines.
     gate: tokio::sync::Mutex<()>,
     /// The warm yt-dlp process, used instead of spawning yt-dlp when it is available.
@@ -386,6 +393,7 @@ impl Resolver {
             routed_args: extra_args.iter().any(|a| ROUTING_OPTS.iter().any(|o| a == o || a.starts_with(&format!("{o}=")))),
             extra_args,
             cache: Mutex::new(HashMap::new()),
+            search_misses: Mutex::new((0, None)),
             gate: tokio::sync::Mutex::new(()),
             refreshing: Mutex::new(HashMap::new()),
         }
@@ -426,9 +434,7 @@ impl Resolver {
         let mut direct = false;
         let target = match classify(input) {
             Target::Search(q) => {
-                if !self.routed()
-                    && let Some(track) = self.fast_search(&q).await
-                {
+                if let Some(track) = self.fast_search(&q).await? {
                     self.store(key, &track);
                     return Ok(track);
                 }
@@ -498,31 +504,54 @@ impl Resolver {
     }
 
     /// Plain-text search: find the first video with YouTube's own search API (about 0.4 s), then
-    /// open its page with yt-dlp, which is quicker than yt-dlp's `ytsearch1:`. `None` means the
-    /// caller should search with `ytsearch1:` instead.
-    async fn fast_search(&self, query: &str) -> Option<Track> {
+    /// open its page with yt-dlp, which is quicker than yt-dlp's `ytsearch1:`. `Ok(None)` means the
+    /// caller should search with `ytsearch1:` instead. When the picked video cannot be opened,
+    /// that error is the answer: `ytsearch1:` would pick the same video and fail the same way.
+    async fn fast_search(&self, query: &str) -> Result<Option<Track>, String> {
+        if self.routed() || self.search_paused() {
+            return Ok(None);
+        }
         let id = match self.innertube_search(query).await {
-            Ok(Some(id)) => id,
-            Ok(None) => return None,
+            Ok(Some(id)) => {
+                *self.search_misses.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+                id
+            }
+            Ok(None) => {
+                self.search_missed(&format!("no video found for {query:?}"));
+                return Ok(None);
+            }
             Err(e) => {
-                tracing::debug!("InnerTube search failed for {query:?}: {e}");
-                return None;
+                self.search_missed(&e);
+                return Ok(None);
             }
         };
-        let url = format!("https://www.youtube.com/watch?v={id}");
-        match self.extract(&url).await {
-            Ok(track) => Some(track),
-            Err(e) => {
-                tracing::info!("fast search pick {id} failed ({e}); searching with yt-dlp");
-                None
-            }
-        }
+        self.extract(&format!("https://www.youtube.com/watch?v={id}")).await.map(Some)
     }
 
-    /// The first video result of a YouTube search, as yt-dlp's `ytsearch1:` would pick it.
+    fn search_paused(&self) -> bool {
+        self.search_misses.lock().unwrap_or_else(|e| e.into_inner()).1.is_some_and(|until| Instant::now() < until)
+    }
+
+    fn search_missed(&self, why: &str) {
+        let mut misses = self.search_misses.lock().unwrap_or_else(|e| e.into_inner());
+        misses.0 += 1;
+        if misses.0 < SEARCH_MAX_MISSES {
+            tracing::warn!("YouTube search API: {why}; searching with yt-dlp");
+            return;
+        }
+        tracing::warn!(
+            "YouTube search API failed {} times in a row (last: {why}); searching with yt-dlp only for {} min",
+            misses.0,
+            SEARCH_PAUSE.as_secs() / 60
+        );
+        *misses = (0, Some(Instant::now() + SEARCH_PAUSE));
+    }
+
+    /// The first video result of a YouTube search, as yt-dlp's `ytsearch1:` would pick it: the same
+    /// client context, so YouTube ranks for the server's region as it does for yt-dlp.
     pub async fn innertube_search(&self, query: &str) -> Result<Option<String>, String> {
         let body = serde_json::json!({
-            "context": { "client": { "clientName": "WEB", "clientVersion": INNERTUBE_WEB_VERSION, "hl": "en", "gl": "US" } },
+            "context": { "client": { "clientName": "WEB", "clientVersion": INNERTUBE_WEB_VERSION, "hl": "en", "timeZone": "UTC", "utcOffsetMinutes": 0 } },
             "query": query,
             // Videos only, the filter yt-dlp's YouTube search uses.
             "params": "EgIQAfABAQ==",
